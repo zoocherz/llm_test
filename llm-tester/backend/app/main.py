@@ -1,0 +1,54 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+from app.core.config import settings
+from app.db.database import init_db
+from app.api import providers, tasks
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Инициализация приложения"""
+    # При старте
+    await init_db()
+    yield
+    # При остановке (очистка ресурсов если нужна)
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="Универсальный инструмент для тестирования промтов и моделей LLM",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS для фронтенда
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # В продакшене ограничить
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Подключаем роутеры
+app.include_router(providers.router, prefix="/api")
+app.include_router(tasks.router, prefix="/api")
+
+
+@app.get("/")
+async def root():
+    """Корневой endpoint"""
+    return {
+        "name": settings.APP_NAME,
+        "description": "LLM Prompt & Model Testing Tool",
+        "docs_url": "/docs",
+        "version": "1.0.0"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Проверка здоровья приложения"""
+    return {"status": "healthy"}
