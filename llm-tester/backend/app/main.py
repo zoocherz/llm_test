@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 
 from app.core.config import settings
 from app.db.database import init_db
-from app.api import providers, tasks
+from app.api import evaluation, providers, tasks
+from app.models import evaluation_models
 
 
 @asynccontextmanager
@@ -33,6 +34,7 @@ app.add_middleware(
 )
 
 # Подключаем роутеры
+app.include_router(evaluation.router, prefix="/api")
 app.include_router(providers.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 

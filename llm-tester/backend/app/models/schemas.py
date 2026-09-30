@@ -93,7 +93,7 @@ class TestCaseBase(BaseModel):
 
 
 class TestCaseCreate(TestCaseBase):
-    task_id: int
+    pass
 
 
 class TestCaseUpdate(BaseModel):

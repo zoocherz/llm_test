@@ -1,0 +1,46 @@
+import { test, expect } from '@playwright/test'
+
+test('saved answers are evaluated separately and can be evaluated again', async ({ page, request }) => {
+  test.setTimeout(90000)
+  const suffix = Date.now()
+  async function post(path, data) {
+    const response = await request.post('/api/v1/' + path, { data })
+    expect(response.ok(), await response.text()).toBeTruthy()
+    return response.json()
+  }
+  const dataset = await post('datasets', { name: 'judge-dataset-' + suffix })
+  await post('datasets/' + dataset.draft_version_id + '/items:commit', [{ external_id: 'judge-row', input: { text: 'hello' }, reference: { answer: 'hello' } }])
+  await post('datasets/' + dataset.draft_version_id + ':publish')
+  const prompt = await post('prompts', { name: 'candidate-' + suffix, template: 'Answer: {{text}}' })
+  const pipeline = await post('pipelines', { name: 'single-' + suffix })
+  const model = await post('model-routes', { provider_name: 'offline', model_identifier: 'judge-model-' + suffix })
+  const suite = await post('evaluation-suites', { name: 'judge-suite-' + suffix, criteria: [{ key: 'quality', description: 'Correctness relative to reference', weight: 1 }], quality_threshold: 0.7 })
+  const source = await post('runs', { dataset_version_id: dataset.draft_version_id, prompt_version_ids: [prompt.id], candidate_route_ids: [model.id], pipeline_version_id: pipeline.id, suite_version_id: suite.id })
+  await page.goto('/runs/' + source.id)
+  await expect(page.locator('.el-descriptions').getByText('completed', { exact: true })).toBeVisible()
+  const before = await (await request.get('/api/v1/runs/' + source.id + '/details')).json()
+  expect(before[0].results).toEqual([])
+  expect(before[0].output_json.text).toContain('Answer: hello')
+  const ids = []
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const panel = page.locator('.evaluation-panel')
+    await panel.getByRole('button', { name: 'Оценить ответы', exact: true }).click()
+    await panel.locator('.el-select').nth(0).click()
+    await page.getByRole('option', { name: 'offline / ' + model.model_identifier, exact: true }).click()
+    await panel.locator('.el-select').nth(1).click()
+    await page.getByRole('option', { name: suite.name, exact: true }).click()
+    await expect(panel.getByText(/Будет выполнено: 1 вызовов судьи/)).toBeVisible()
+    await panel.getByRole('button', { name: 'Запустить отдельную оценку' }).click()
+    await expect(page).not.toHaveURL(new RegExp(source.id + '$'))
+    await expect(page.getByText(/Отдельная оценка · Судья/)).toBeVisible()
+    await expect(page.locator('.el-descriptions').getByText('completed', { exact: true })).toBeVisible()
+    await expect(page.getByText('Offline-оценки — тестовые, не отражают качество ответов.')).toBeVisible()
+    ids.push(page.url().split('/').pop())
+    await page.getByRole('link', { name: 'Открыть исходные ответы' }).click()
+    await expect(page).toHaveURL(new RegExp(source.id + '$'))
+    await expect(page.getByText('Предыдущие оценки', { exact: true })).toBeVisible()
+  }
+  expect(new Set(ids).size).toBe(2)
+  expect(await (await request.get('/api/v1/runs/' + source.id + '/details')).json()).toEqual(before)
+  await expect(page.locator('.evaluation-panel').getByRole('link')).toHaveCount(2)
+})

@@ -53,7 +53,7 @@ async def create_task(
     return task
 
 
-@router.get("/{task_id}", response_model=TaskResponse)
+@router.get("/{task_id:int}", response_model=TaskResponse)
 async def get_task(
     task_id: int,
     db: AsyncSession = Depends(get_db)
@@ -68,7 +68,7 @@ async def get_task(
     return task
 
 
-@router.put("/{task_id}", response_model=TaskResponse)
+@router.put("/{task_id:int}", response_model=TaskResponse)
 async def update_task(
     task_id: int,
     task_data: TaskUpdate,
@@ -90,7 +90,7 @@ async def update_task(
     return task
 
 
-@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{task_id:int}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_task(
     task_id: int,
     db: AsyncSession = Depends(get_db)
@@ -109,7 +109,7 @@ async def delete_task(
 
 # === TestCase Endpoints ===
 
-@router.get("/{task_id}/test-cases", response_model=List[TestCaseResponse])
+@router.get("/{task_id:int}/test-cases", response_model=List[TestCaseResponse])
 async def get_test_cases(
     task_id: int,
     db: AsyncSession = Depends(get_db)
@@ -121,7 +121,7 @@ async def get_test_cases(
     return list(result.scalars().all())
 
 
-@router.post("/{task_id}/test-cases", response_model=TestCaseResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/{task_id:int}/test-cases", response_model=TestCaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_test_case(
     task_id: int,
     test_case_data: TestCaseCreate,

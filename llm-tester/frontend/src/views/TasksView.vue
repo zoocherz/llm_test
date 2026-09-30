@@ -234,7 +234,7 @@ const saveTestCase = async () => {
     const res = await tasksApi.getTestCases(currentTask.value.id)
     testCases.value = res.data
   } catch (e) {
-    ElMessage.error('Failed to add test case')
+    ElMessage.error(e.response?.data?.detail || 'Failed to add test case')
   }
 }
 

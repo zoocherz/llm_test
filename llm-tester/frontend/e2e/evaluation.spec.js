@@ -1,0 +1,167 @@
+const path = require('path')
+const { test, expect } = require('@playwright/test')
+
+test('v1 workspace navigation and offline evaluation', async ({ page }) => {
+  // Includes cold Vite startup and the full import/revision/model/run/export workflow.
+  test.setTimeout(90000)
+  const suffix = Date.now().toString()
+  const modelName = 'deterministic-updated-' + suffix
+
+  await page.goto('/')
+  await expect(page.getByText('Главная', { exact: true }).first()).toBeVisible()
+
+  await page.getByRole('menuitem', { name: 'Датасеты' }).click()
+  await expect(page).toHaveURL(/\/datasets$/)
+  const datasetCard = page.locator('.el-card').first()
+  const datasetName = 'e2e-dataset-' + suffix
+  await datasetCard.getByRole('textbox', { name: 'Название' }).fill(datasetName)
+  await datasetCard.getByText('Файл CSV / JSONL', { exact: true }).click()
+  const mappingPanel = datasetCard.locator('.mapping-panel')
+  await datasetCard.locator('input[type="file"]').setInputFiles(path.resolve(__dirname, '../../../test/test1.csv'))
+  await datasetCard.getByRole('button', { name: 'Проверить строки' }).click()
+  await expect(datasetCard.getByText(/корректных строк — 0, ошибок — 3/)).toBeVisible()
+  await expect(datasetCard.getByText(/Распознано: windows-1251/)).toBeVisible()
+  await expect(datasetCard.getByText(/разделитель «;»/)).toBeVisible()
+  await expect(mappingPanel.getByText(/Алло, это менеджер Иван/)).toBeVisible()
+  await datasetCard.locator('input[type="file"]').setInputFiles(path.resolve(__dirname, '../../../test/dataset.jsonl'))
+  await datasetCard.getByRole('button', { name: 'Проверить строки' }).click()
+  await expect(datasetCard.getByText(/корректных строк — 0, ошибок — 3/)).toBeVisible()
+  await expect(datasetCard.getByText(/обязательное поле «external_id» отсутствует/).first()).toBeVisible()
+  await expect(mappingPanel.getByText('Сопоставление полей файла', { exact: true })).toBeVisible()
+  await expect(mappingPanel.locator('.source-preview tbody tr')).toHaveCount(3)
+  await expect(mappingPanel.getByText(/Алло, это менеджер Иван/)).toBeVisible()
+  await mappingPanel.getByRole('button', { name: 'Применить сопоставление' }).click()
+  await expect(datasetCard.getByText(/корректных строк — 3, ошибок — 0/)).toBeVisible()
+  await expect(mappingPanel.getByText('Сопоставление проверено', { exact: true })).toBeVisible()
+  await datasetCard.getByText('JSONL-текст', { exact: true }).click()
+  await datasetCard.locator('textarea').fill('{"external_id":"e2e-row","input":{"text":"browser smoke"}}')
+  await datasetCard.getByRole('button', { name: 'Проверить строки' }).click()
+  await expect(datasetCard.getByText(/корректных строк — 1, ошибок — 0/)).toBeVisible()
+  await datasetCard.getByRole('button', { name: 'Сохранить и опубликовать' }).click()
+  await expect(datasetCard.getByText(/Опубликован датасет «e2e-dataset-/)).toBeVisible()
+  const savedDatasetRow = page.locator('.el-card').nth(1).getByRole('row').filter({ hasText: datasetName })
+  await savedDatasetRow.getByRole('button', { name: 'Просмотреть' }).click()
+  await expect(page.getByRole('dialog').getByText('browser smoke')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await savedDatasetRow.getByRole('button', { name: 'Новая версия' }).click()
+  await expect(datasetCard.getByText(/Будет создана полная версия v2/)).toBeVisible()
+  await datasetCard.getByText('JSONL-текст', { exact: true }).click()
+  await datasetCard.locator('textarea').fill('{"external_id":"e2e-row-v2","input":{"text":"replacement browser smoke"}}')
+  await datasetCard.getByRole('button', { name: 'Проверить строки' }).click()
+  await expect(datasetCard.getByText(/корректных строк — 1, ошибок — 0/)).toBeVisible()
+  await page.route('**/api/v1/datasets/*:publish', (route) => route.abort(), { times: 1 })
+  await datasetCard.getByRole('button', { name: 'Опубликовать новую версию' }).click()
+  await expect(datasetCard.getByText('Network Error', { exact: true })).toBeVisible()
+  await datasetCard.getByRole('button', { name: 'Опубликовать новую версию' }).click()
+  await expect(datasetCard.getByText(/Опубликована новая версия .* · v2/)).toBeVisible()
+  const revisionRow = page.locator('.el-card').nth(1).getByRole('row').filter({ hasText: datasetName }).filter({ hasText: 'v2' })
+  await revisionRow.getByRole('button', { name: 'Просмотреть' }).click()
+  await expect(page.getByRole('dialog').getByText('replacement browser smoke')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('menuitem', { name: 'Модели' }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  const modelsCard = page.locator('.el-card').first()
+  await modelsCard.getByRole('textbox', { name: 'Модель' }).fill('initial-' + suffix)
+  await modelsCard.getByRole('button', { name: 'Сохранить подключение' }).click()
+  await expect(modelsCard.getByText(/Подключение сохранено/)).toBeVisible()
+  const savedModelsCard = page.locator('.el-card').nth(1)
+  await savedModelsCard.getByRole('row').filter({ hasText: 'initial-' + suffix }).getByRole('button', { name: 'Изменить' }).click()
+  await modelsCard.getByRole('textbox', { name: 'Модель' }).fill(modelName)
+  await modelsCard.getByRole('button', { name: 'Сохранить изменения' }).click()
+  await expect(modelsCard.getByText(/Подключение обновлено/)).toBeVisible()
+
+  await page.getByRole('menuitem', { name: 'Главная' }).click()
+  const quickCard = page.locator('.el-card').filter({ hasText: 'Быстрый запуск' }).first()
+  await quickCard.getByRole('textbox', { name: 'Тексты для проверки' }).fill('quick browser smoke')
+  await quickCard.locator('.el-select').click()
+  await page.getByRole('option', { name: new RegExp(modelName) }).click()
+  await page.keyboard.press('Escape')
+  await expect(quickCard.getByRole('button', { name: 'Запустить сравнение' })).toBeEnabled()
+  await quickCard.getByRole('button', { name: 'Запустить сравнение' }).click()
+  await expect(quickCard.getByText(/Запуск создан: 1 примеров × 1 моделей/)).toBeVisible()
+
+  const quickDetailsCard = page.locator('.el-card').filter({ hasText: /^Run / }).last()
+  await expect(quickDetailsCard.locator('.el-descriptions').getByText('completed', { exact: true })).toBeVisible({ timeout: 15000 })
+  await expect(quickDetailsCard.getByText('Сводка по моделям', { exact: true })).toBeVisible()
+  const summaryRow = quickDetailsCard.locator('.el-table').nth(0).getByRole('row').filter({ hasText: modelName })
+  await expect(summaryRow).toContainText('1 / 1')
+  const itemTable = quickDetailsCard.locator('.el-table').nth(1)
+  await itemTable.getByRole('button', { name: 'Открыть', exact: true }).first().click()
+  await expect(page.getByRole('dialog').locator('pre').filter({ hasText: '"text": "quick browser smoke"' }).first()).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('menuitem', { name: 'Эксперименты' }).click()
+  await expect(page).toHaveURL(/\/experiments$/)
+  await page.getByText('Настройки', { exact: true }).click()
+  const configurationCard = page.locator('.el-card').filter({ hasText: 'Настройки эксперимента' })
+  await configurationCard.getByRole('button', { name: 'Создать и выбрать рекомендуемую настройку' }).click()
+  await expect(configurationCard.getByText(/созданы и выбраны инструкция/)).toBeVisible()
+  await page.getByText('Запуск', { exact: true }).click()
+
+  const runCard = page.locator('.el-card').filter({ hasText: 'Подробная проверка и запуск' })
+  await runCard.getByRole('button', { name: 'Оценить объём' }).click()
+  await expect(runCard.getByText(/Будет выполнено: 1 вызовов/)).toBeVisible()
+  await runCard.getByRole('button', { name: 'Запустить выбранную конфигурацию' }).click()
+
+  const detailsCard = page.locator('.el-card').filter({ hasText: /^Run / }).last()
+  await expect(detailsCard.locator('.el-descriptions').getByText('completed', { exact: true })).toBeVisible({ timeout: 15000 })
+  const jsonDownload = page.waitForEvent('download')
+  await detailsCard.getByRole('button', { name: 'Экспорт JSON' }).click()
+  await expect((await jsonDownload).suggestedFilename()).toMatch(/\.json$/)
+  const csvDownload = page.waitForEvent('download')
+  await detailsCard.getByRole('button', { name: 'Экспорт CSV' }).click()
+  await expect((await csvDownload).suggestedFilename()).toMatch(/\.csv$/)
+
+  await page.getByRole('menuitem', { name: 'Модели' }).click()
+  const modelsList = page.locator('.el-card').nth(1)
+  const updatedRouteRow = modelsList.getByRole('row').filter({ hasText: modelName })
+  await updatedRouteRow.getByRole('button', { name: 'Удалить' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Удалить', exact: true }).click()
+  await expect(page.getByText('Подключение удалено. История запусков не изменена.')).toBeVisible()
+  await expect(modelsList.getByRole('cell', { name: modelName })).toHaveCount(0)
+
+  await expect(page.getByRole('menuitem', { name: 'Providers' })).toHaveCount(0)
+  await expect(page.getByRole('menuitem', { name: 'Tasks' })).toHaveCount(0)
+  await expect(page.getByRole('menuitem', { name: 'Test Runs' })).toHaveCount(0)
+  await page.getByRole('menuitem', { name: 'Запуски' }).click()
+  await expect(page.getByText('Запуски', { exact: true }).first()).toBeVisible()
+  const runsTable = page.locator('.runs-view .el-table').first()
+  await runsTable.getByRole('row').nth(1).click()
+  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  await expect(page.getByText('Сводка по моделям', { exact: true })).toBeVisible()
+  await expect(page.getByText(/Ответы получены без оценки качества/)).toBeVisible()
+  await expect(page.locator('.el-card').filter({ hasText: /^Run / }).getByRole('cell', { name: 'offline / ' + modelName, exact: true }).first()).toBeVisible()
+
+  await page.goto('/providers')
+  await expect(page).toHaveURL(/\/legacy\/providers$/)
+  await expect(page.getByText('Providers Management', { exact: true }).first()).toBeVisible()
+})
+
+
+
+
+
+
+
+
+
+
+
+
+
+test('section menu follows shortcut navigation, history and reload', async ({ page }) => {
+  await page.goto('/experiments')
+  const active = () => page.locator('.main-header .el-menu-item.is-active')
+  await expect(active()).toHaveText('Эксперименты')
+  for (const [label, url] of [['Датасеты', '/datasets'], ['Модели', '/models'], ['Запуски', '/runs']]) {
+    await page.getByRole('button', { name: 'Перейти в «' + label + '»', exact: true }).click()
+    await expect(page).toHaveURL(new RegExp(url + '$'))
+    await expect(active()).toHaveText(label)
+    await page.reload()
+    await expect(active()).toHaveText(label)
+    await page.goBack()
+    await expect(page).toHaveURL(/\/experiments$/)
+    await expect(active()).toHaveText('Эксперименты')
+  }
+})
