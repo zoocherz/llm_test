@@ -27,7 +27,7 @@ export const evaluationApi = {
   createPrompt: (data) => api.post('/v1/prompts', data), listPrompts: () => api.get('/v1/prompts'),
   createPipeline: (data) => api.post('/v1/pipelines', data), listPipelines: () => api.get('/v1/pipelines'),
   createRoute: (data) => api.post('/v1/model-routes', data), updateRoute: (id, data) => api.put('/v1/model-routes/' + id, data), deleteRoute: (id) => api.delete('/v1/model-routes/' + id),
-  listRoutes: () => api.get('/v1/model-routes'), listProviderModels: (providerName, credentialRef) => api.get('/v1/provider-models', { params: { provider_name: providerName, credential_ref: credentialRef || undefined } }),
+  listRoutes: () => api.get('/v1/model-routes'), listProviderModels: (providerName, credentialRef, endpoint = {}) => api.get('/v1/provider-models', { params: { provider_name: providerName, credential_ref: credentialRef || undefined, ...endpoint } }),
   createSuite: (data) => api.post('/v1/evaluation-suites', data), listSuites: () => api.get('/v1/evaluation-suites'),
   estimateRun: (data) => api.post('/v1/runs:estimate', data), createRun: (data) => api.post('/v1/runs', data),
   listRuns: () => api.get('/v1/runs'), getRun: (id) => api.get('/v1/runs/' + id), getRunItems: (id) => api.get('/v1/runs/' + id + '/items'),

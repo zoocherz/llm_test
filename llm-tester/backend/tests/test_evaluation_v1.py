@@ -324,6 +324,14 @@ class EvaluationBaselineTests(unittest.TestCase):
                 await db.commit()
                 run_id = run.id
             async def finish_current(*args, **kwargs):
+                await kwargs['on_attempt'](1)
+                live = (await asyncio.to_thread(self.client.get, f'/api/v1/runs/{run_id}')).json()
+                details = (await asyncio.to_thread(self.client.get, f'/api/v1/runs/{run_id}/details')).json()
+                active = next(row for row in details if row['status'] == 'running')
+                self.assertEqual(live['progress_json']['active_item_id'], active['id'])
+                self.assertEqual(live['progress_json']['http_attempt'], 1)
+                self.assertEqual(active['attempts'][0]['route_snapshot_json']['http_attempts'], 1)
+                self.assertIsNone(active['attempts'][0]['latency_ms'])
                 response = await asyncio.to_thread(self.client.post, f'/api/v1/runs/{run_id}:cancel')
                 self.assertEqual(response.json()['status'], 'cancelling')
                 retry = await asyncio.to_thread(self.client.post, f'/api/v1/runs/{run_id}:retry', json={'item_ids': [str(uuid4())]})
@@ -555,6 +563,47 @@ class EvaluationBaselineTests(unittest.TestCase):
         response = self.client.get("/api/tasks/runs?limit=100")
         self.assertEqual(response.status_code, 200)
         self.assertIsInstance(response.json(), list)
+
+    def test_crt_endpoint_snapshot_edit_and_legacy_preflight(self):
+        version, prompt, pipeline, route, suite = self.ready_fixture()
+        rejected_secret = self.client.post('/api/v1/model-routes', json={'provider_name': 'crt_mko', 'model_identifier': 'test', 'capabilities': {'base_url': 'https://user:synthetic-private-secret@mko.test/api/v1'}})
+        self.assertEqual(rejected_secret.status_code, 422)
+        self.assertNotIn('synthetic-private-secret', rejected_secret.text)
+        configuration = {'provider_name': 'crt_mko', 'model_identifier': 'synthetic', 'capabilities': {'modalities': ['text'], 'base_url': 'https://first.test:9443/api/v1'}, 'timeout_seconds': 180}
+        saved = self.client.put('/api/v1/model-routes/' + route['id'], json=configuration)
+        self.assertEqual(saved.status_code, 200)
+        request = {'dataset_version_id': version, 'prompt_version_ids': [prompt['id']], 'candidate_route_ids': [route['id']], 'pipeline_version_id': pipeline['id']}
+        with patch('app.services.evaluation_runner.generate_external', new=AsyncMock(return_value={'text': 'final'})) as provider:
+            created = self.client.post('/api/v1/runs', json=request)
+            self.assertEqual(created.status_code, 202)
+            run_id = created.json()['id']
+            state = self.wait_run(run_id)
+            self.assertEqual(provider.call_args.args[0]['capabilities_json']['base_url'], 'https://first.test:9443/api/v1')
+        configuration['capabilities']['base_url'] = 'https://second.test/api/v1'
+        self.assertEqual(self.client.put('/api/v1/model-routes/' + route['id'], json=configuration).status_code, 200)
+        snapshot = self.client.get('/api/v1/runs/' + run_id).json()['snapshot_json']
+        self.assertEqual(snapshot, state['snapshot_json'])
+        rows = self.client.get('/api/v1/runs/' + run_id + '/details').json()
+        with patch('app.services.evaluation_runner.generate_external', new=AsyncMock(return_value={'text': 'repeat'})) as provider:
+            self.assertEqual(self.client.post('/api/v1/runs/' + run_id + ':retry', json={'item_ids': [rows[0]['id']]}).status_code, 202)
+            self.wait_run(run_id)
+            self.assertEqual(provider.call_args.args[0]['capabilities_json']['base_url'], 'https://first.test:9443/api/v1')
+        async def legacy_snapshot():
+            async with async_session_maker() as db:
+                run = await db.get(EvaluationRun, run_id)
+                snapshot = dict(run.snapshot_json)
+                snapshot['routes'][0]['capabilities_json'].pop('base_url')
+                run.snapshot_json = snapshot
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(run, 'snapshot_json')
+                await db.commit()
+        asyncio.run(legacy_snapshot())
+        with patch('app.services.evaluation_runner.generate_external', new=AsyncMock()) as provider:
+            rejected = self.client.post('/api/v1/runs/' + run_id + ':retry', json={'item_ids': [rows[0]['id']]})
+            self.assertEqual(rejected.status_code, 422)
+            self.assertEqual(rejected.json()['detail']['code'], 'endpoint_required')
+            provider.assert_not_called()
+        self.assertEqual(self.client.get('/api/v1/runs/' + run_id).json()['status'], 'completed')
 
 if __name__ == "__main__":
     unittest.main()

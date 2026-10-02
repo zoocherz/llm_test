@@ -55,3 +55,5 @@
 - `docs/scenarios.md` — рабочий черновик владельца и источник discovery-гипотез; не каноническая спецификация.
 - `docs/INFORMATION_ARCHITECTURE.md` — целевые разделы приложения, назначение экранов, судьба legacy-навигации и порядок миграции.
 - `docs/UX_FLOWS.md` — конкретные пользовательские потоки и progressive disclosure.
+
+- docs/CRT_PROGRESS_REFINEMENT.md — настраиваемый ЦРТ, live progress и разбор ответов.

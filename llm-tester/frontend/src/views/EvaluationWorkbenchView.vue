@@ -47,7 +47,7 @@
       <el-table :data="runs.slice(0, 5)" max-height="240" empty-text="Запусков пока нет" @row-click="openRun" class="clickable">
         <el-table-column label="Тип" min-width="190"><template #default="{ row }">{{ row.kind === 'evaluation' ? 'Оценка судьёй' : row.kind === 'generation' ? 'Генерация ответов' : 'Старый запуск' }}</template></el-table-column>
         <el-table-column prop="status" label="Статус" width="180" />
-        <el-table-column label="Готово" width="150"><template #default="{ row }">{{ row.progress_json?.completed || 0 }} / {{ row.progress_json?.total || 0 }}</template></el-table-column>
+        <el-table-column label="Готово" width="150"><template #default="{ row }"><RunProgress :run="row" compact /></template></el-table-column>
         <el-table-column label="Создан" width="210"><template #default="{ row }">{{ formatDate(row.created_at) }}</template></el-table-column>
         <el-table-column label="Идентификатор"><template #default="{ row }">{{ shortId(row.id) }}</template></el-table-column>
       </el-table>
@@ -60,6 +60,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ExperimentConfiguration from '../components/ExperimentConfiguration.vue'
 import { evaluationApi } from '../api'
 import RunResults from '../components/RunResults.vue'
+import RunProgress from '../components/RunProgress.vue'
 import { explain } from '../utils/evaluationErrors'
 import { useRunDetails } from '../composables/useRunDetails'
 const props = defineProps({ experimentMode: { type: Boolean, default: false } })

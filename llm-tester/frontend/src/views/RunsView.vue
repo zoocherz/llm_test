@@ -9,7 +9,7 @@
       <el-select v-model="statusFilter" clearable placeholder="Все статусы"><el-option v-for="status in ['queued','running','cancelling','completed','completed_with_errors','failed','cancelled']" :key="status" :value="status" :label="status" /></el-select>
       <p>{{ filteredRuns.length }} из {{ runs.length }} запусков</p>
       <el-table :data="filteredRuns" max-height="65vh" empty-text="Нет подходящих запусков" class="clickable" highlight-current-row @row-click="selectRun">
-        <el-table-column prop="created_at" label="Запуск · сортировка по дате" sortable><template #default="{ row }"><b>{{ (row.kind || row.snapshot_json?.kind) === 'evaluation' ? 'Оценка судьёй' : (row.kind || row.snapshot_json?.kind) === 'generation' ? 'Генерация ответов' : 'Старый запуск' }}</b><div>{{ row.status }} · {{ row.progress_json?.completed || 0 }} / {{ row.progress_json?.total || 0 }}</div><small>{{ formatDate(row.created_at) }} · {{ shortId(row.id) }}</small></template></el-table-column>
+        <el-table-column prop="created_at" label="Запуск · сортировка по дате" sortable><template #default="{ row }"><b>{{ (row.kind || row.snapshot_json?.kind) === 'evaluation' ? 'Оценка судьёй' : (row.kind || row.snapshot_json?.kind) === 'generation' ? 'Генерация ответов' : 'Старый запуск' }}</b><RunProgress :run="row" compact /><small>{{ formatDate(row.created_at) }} · {{ shortId(row.id) }}</small></template></el-table-column>
       </el-table>
     </el-card>
 
@@ -17,10 +17,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { evaluationApi } from '../api'
 import RunResults from '../components/RunResults.vue'
+import RunProgress from '../components/RunProgress.vue'
 import { explain } from '../utils/evaluationErrors'
 import { useRunDetails } from '../composables/useRunDetails'
 
@@ -38,17 +39,22 @@ const loading = ref(false)
 const shortId = (id) => id ? id.slice(0, 8) : ''
 const formatDate = (value) => value ? new Date(value).toLocaleString('ru-RU') : '—'
 
-async function loadRuns() {
+let historyTimer, disposed = false
+async function loadRuns(quiet = false) {
+  clearTimeout(historyTimer)
+  if (loading.value || disposed) return
   loading.value = true
-  error.value = ''
+  if (!quiet) error.value = ''
   try {
     const [runRows, routeRows] = await Promise.all([evaluationApi.listRuns(), evaluationApi.listRoutes()])
+    if (disposed) return
     runs.value = runRows.data
     routes.value = routeRows.data
   } catch (cause) {
-    error.value = explain(cause, 'Не удалось загрузить историю запусков')
+    if (!quiet && !disposed) error.value = explain(cause, 'Не удалось загрузить историю запусков')
   } finally {
     loading.value = false
+    if (!disposed) historyTimer = setTimeout(() => loadRuns(true), 2000)
   }
 }
 
@@ -59,6 +65,7 @@ function selectRun(row) {
 
 
 watch(() => route.params.runId, (id) => openRunDetails(id))
+onBeforeUnmount(() => { disposed = true; clearTimeout(historyTimer) })
 onMounted(async () => {
   await loadRuns()
   if (route.params.runId) await openRunDetails(route.params.runId)

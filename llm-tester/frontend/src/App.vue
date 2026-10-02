@@ -11,13 +11,14 @@
           <el-menu-item index="/runs">Запуски</el-menu-item>
         </el-menu>
       </el-header>
-      <el-main><router-view /></el-main>
+      <el-main><ActiveRuns /><router-view /></el-main>
       <el-footer>LLM Prompt &amp; Model Testing Tool © 2024</el-footer>
     </el-container>
   </div>
 </template>
 <script setup>
 import { computed } from 'vue'
+import ActiveRuns from './components/ActiveRuns.vue'
 import { useRoute } from 'vue-router'
 const route = useRoute()
 const activeSection = computed(() => route.path === '/' ? '/' : '/' + route.path.split('/')[1])

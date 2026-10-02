@@ -66,3 +66,11 @@ Preview возвращает source_format, source_fields, `source_preview` (д�
 - `GET /api/v1/provider-models?provider_name=google|openrouter&credential_ref=env:NAME` resolves the credential only server-side and returns normalized rows: `id`, `display_name`, `provider_name`, `is_free`, `context_window`, `input_modalities`, `output_modalities`. Raw credentials and provider response bodies are not returned.
 - Google catalog includes only models supporting `generateContent`. OpenRouter free status is derived from zero prompt/completion pricing; the `openrouter/free` router is included as a recommended free option.
 - ModelRoute `timeout_seconds` is a total per-RunItem execution budget, including retries and backoff.
+
+## Настраиваемый ЦРТ и прогресс (2026-10-02)
+
+ModelRoute.capabilities.base_url обязателен для crt_mko; полный HTTP/HTTPS URL API без credentials/query/fragment. HTTP требует capabilities.allow_insecure_http=true. GET /provider-models принимает base_url и allow_insecure_http; неверный/отсутствующий адрес — 422 до сети. Адрес включён в RunSnapshot; update ModelRoute не меняет snapshot. Estimate/create/evaluate/retry валидируют соответствующий текущий или сохранённый адрес.
+
+RunItem.status=running и Attempt появляются до вызова. progress_json во время обработки дополнительно содержит active_item_id, attempt (номер повтора строки), http_attempt, active_started_at (UTC), timeout_seconds. completed — число завершённых completed/failed строк, failed — отдельное подмножество; отменённые строки не выдаются за обработанные. Attempt.route_snapshot_json содержит sequence, started_at, http_attempts, completed_at; latency_ms=null означает незавершённую попытку. Terminal progress сохраняет прежние completed/total/failed для совместимости.
+
+Details добавляет display_text для удобного чтения исторических ответов без изменения БД. Новые ответы ЦРТ имеют очищенный text; при изменении исходника сохраняются raw_text и normalization=crt_final_text_v1. Экспорт и snapshot сохраняют исторические данные. Invalid JSON имеет код invalid_json, error-envelope — provider_error; raw HTTP bodies не экспортируются. Ошибки входной валидации возвращают type/loc/msg без input/context, чтобы не отражать присланные секреты.

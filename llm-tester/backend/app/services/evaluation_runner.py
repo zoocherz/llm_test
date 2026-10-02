@@ -45,6 +45,24 @@ class EvaluationRunner:
             route_info['sequence'] = sequence
             attempt_kind = 'retry' if previous else 'initial'
             output = None
+            item.status = 'running'
+            route_info.update(started_at=datetime.utcnow().isoformat() + 'Z', http_attempts=0)
+            attempt_record = EvaluationAttempt(run_item_id=item.id, node_id=node_id, kind=attempt_kind, route_snapshot_json=dict(route_info))
+            self.db.add(attempt_record)
+            run.progress_json = {'completed': processed, 'total': len(items), 'failed': failures,
+                                 'active_item_id': item.id, 'attempt': sequence, 'http_attempt': 0,
+                                 'active_started_at': route_info['started_at'], 'timeout_seconds': (route or {}).get('timeout_seconds', 60)}
+            await self.db.commit()
+
+            async def report_http_attempt(number):
+                await self.db.refresh(run)
+                if number > 1 and run.status in {'cancelled', 'cancelling'}:
+                    raise ProviderExecutionError('cancelled', 'Повторный HTTP-запрос не отправлен: запуск отменяется.')
+                route_info['http_attempts'] = number
+                attempt_record.route_snapshot_json = dict(route_info)
+                run.progress_json = {**run.progress_json, 'http_attempt': number}
+                await self.db.commit()
+
             try:
                 if route is None:
                     raise ValueError('ModelRoute snapshot is unavailable')
@@ -70,7 +88,7 @@ class EvaluationRunner:
                     else:
                         output = {'text': f'[offline:{item.route_id[:8]}] {text}'}
                 else:
-                    output = await generate_external(route, NormalizedGenerationRequest(model=route['model_identifier'], prompt=text, max_output_tokens=snapshot.get('policy', {}).get('max_output_tokens', 1024)))
+                    output = await generate_external(route, NormalizedGenerationRequest(model=route['model_identifier'], prompt=text, max_output_tokens=snapshot.get('policy', {}).get('max_output_tokens', 1024)), on_attempt=report_http_attempt)
                 if output.get('finish_reason') in {'MAX_TOKENS', 'length'}:
                     raise ProviderExecutionError('truncated_response', 'Ответ оборван по лимиту выходных токенов. Увеличьте лимит в настройках нового запуска.', retryable=False)
                 if output.get('finish_reason') in {'SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'content_filter'}:
@@ -82,7 +100,7 @@ class EvaluationRunner:
                     value['_attempt'] = sequence
                     self.db.add(EvaluationResult(run_item_id=item.id, evaluator_id='judge', status='completed', value_json=value, numeric_score=value['score']))
                 item.output_json, item.status, item.error_json = output, 'completed', None
-                self.db.add(EvaluationAttempt(run_item_id=item.id, node_id=node_id, kind=attempt_kind, route_snapshot_json=route_info, latency_ms=max(1, round((perf_counter() - started) * 1000)), output_json=output))
+                attempt_record.output_json = output
             except Exception as exc:
                 failures += 1
                 if isinstance(exc, ProviderExecutionError):
@@ -90,9 +108,11 @@ class EvaluationRunner:
                 else:
                     error = {'code': 'execution_error', 'message': 'Execution failed: input or saved configuration is invalid', 'retryable': False}
                 item.status, item.error_json, item.output_json = 'failed', error, None
-                self.db.add(EvaluationAttempt(run_item_id=item.id, node_id=node_id, kind=attempt_kind, route_snapshot_json=route_info, latency_ms=max(1, round((perf_counter() - started) * 1000)), output_json=output, error_json=error))
+                attempt_record.output_json, attempt_record.error_json = output, error
                 if is_judge:
                     self.db.add(EvaluationResult(run_item_id=item.id, evaluator_id='judge', status='failed', value_json={'error': error, '_attempt': sequence}, numeric_score=None))
+            attempt_record.latency_ms = max(1, round((perf_counter() - started) * 1000))
+            attempt_record.route_snapshot_json = {**route_info, 'completed_at': datetime.utcnow().isoformat() + 'Z'}
             # Refresh only the Run to observe cancellation while a provider was pending.
             await self.db.refresh(run)
             processed += 1

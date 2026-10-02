@@ -12,8 +12,8 @@
           <el-checkbox v-if="provider === 'openrouter'" v-model="freeOnly">Только бесплатные модели</el-checkbox>
         </el-form-item>
         <el-form-item v-if="!['offline', 'crt_mko'].includes(provider)" label="Имя переменной с ключом"><el-input v-model="activeDraft.secretName" placeholder="GOOGLE_API_KEY" /><span class="field-help">Укажите только имя; значение ключа не передаётся браузеру.</span></el-form-item>
-        <el-form-item v-if="provider === 'crt_mko'" label="Подключение ЦРТ МКО"><p>http://super-project-work.ru:8001 — без авторизации. Тексты передаются без шифрования. Лимит выходных токенов на этом сервисе пока не гарантируется.</p><el-checkbox v-model="activeDraft.allowHttp">Разрешаю передачу выбранных данных по HTTP</el-checkbox></el-form-item>
-        <el-form-item label="Максимальное ожидание"><el-input-number v-model="activeDraft.timeout" :min="1" :max="600" /><span class="field-help">секунд на весь вызов, включая retry</span></el-form-item>
+        <el-form-item v-if="provider === 'crt_mko'" label="Адрес API ЦРТ МКО"><el-input v-model="activeDraft.baseUrl" placeholder="https://mko.example.org:8443/api/v1" @input="endpointChanged" /><span class="field-help">Полный адрес API: сервер, порт и путь (обычно /api/v1). Без авторизации. Сначала укажите адрес, затем обновите список моделей. Лимит выходных токенов пока не гарантируется.</span><el-checkbox v-if="activeDraft.baseUrl.trim().toLowerCase().startsWith('http:')" v-model="activeDraft.allowHttp">Разрешаю передачу выбранных данных по HTTP</el-checkbox></el-form-item>
+        <el-form-item label="Максимальное ожидание"><el-input-number v-model="activeDraft.timeout" :min="1" :max="600" /><span class="field-help">секунд на весь вызов, включая HTTP-повторы. После таймаута увеличьте ожидание и создайте новый запуск: старый повтор сохраняет прежний лимит.</span></el-form-item>
         <el-form-item><el-button type="primary" :loading="saving" @click="saveRoute">{{ editingId ? 'Сохранить изменения' : 'Сохранить подключение' }}</el-button><el-button v-if="editingId" @click="cancelEdit">Отменить изменение</el-button></el-form-item>
       </el-form>
       <el-alert v-if="catalogError" :title="catalogError" type="warning" show-icon :closable="false" />
@@ -25,7 +25,8 @@
       <el-table :data="routes" empty-text="Подключений пока нет">
         <el-table-column prop="provider_name" label="Сервис" width="140" />
         <el-table-column prop="model_identifier" label="Модель" min-width="260" />
-        <el-table-column label="Ключ" width="160"><template #default="{ row }"><el-tag :type="row.credential_available ? 'success' : 'danger'">{{ row.provider_name === 'offline' ? 'не требуется' : (row.credential_available ? 'доступен' : 'не найден') }}</el-tag></template></el-table-column>
+        <el-table-column label="Ключ" width="160"><template #default="{ row }"><el-tag :type="row.credential_available ? 'success' : 'danger'">{{ ['offline', 'crt_mko'].includes(row.provider_name) ? 'не требуется' : (row.credential_available ? 'доступен' : 'не найден') }}</el-tag></template></el-table-column>
+        <el-table-column label="Адрес API" min-width="230"><template #default="{ row }">{{ row.capabilities_json?.base_url || (row.provider_name === 'crt_mko' ? 'Укажите адрес через «Изменить»' : 'Стандартный') }}</template></el-table-column>
         <el-table-column label="Timeout" width="110"><template #default="{ row }">{{ row.timeout_seconds }} с</template></el-table-column>
         <el-table-column label="Действия" width="190"><template #default="{ row }"><el-button link @click="editRoute(row)">Изменить</el-button><el-button link type="danger" :loading="deletingId === row.id" @click="deleteRoute(row)">Удалить</el-button></template></el-table-column>
       </el-table>
@@ -53,7 +54,7 @@ const drafts = reactive({
   offline: { model: 'deterministic', secretName: '', timeout: 60 },
   google: { model: 'gemini-3.6-flash', secretName: 'GOOGLE_API_KEY', timeout: 60 },
   openrouter: { model: 'openrouter/free', secretName: 'OPENROUTER_API_KEY', timeout: 60 },
-  crt_mko: { model: '', secretName: '', timeout: 120, allowHttp: false },
+  crt_mko: { model: '', secretName: '', timeout: 120, allowHttp: false, baseUrl: '' },
 })
 const catalogs = reactive({ google: [], openrouter: [], crt_mko: [] })
 const activeDraft = computed(() => drafts[provider.value])
@@ -84,15 +85,29 @@ async function loadRoutes() {
   catch (cause) { error.value = explain(cause, 'Не удалось загрузить модели') }
   finally { loading.value = false }
 }
+let catalogGeneration = 0
+function endpointChanged() { catalogGeneration += 1; catalogs.crt_mko = []; drafts.crt_mko.allowHttp = false; catalogError.value = '' }
+function endpointOptions() {
+  if (provider.value !== 'crt_mko') return {}
+  let url
+  try { url = new URL(activeDraft.value.baseUrl.trim()) } catch { throw new Error('Укажите полный адрес API ЦРТ МКО.') }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Нужен HTTP/HTTPS адрес без логина, пароля и параметров.')
+  if (url.protocol === 'http:' && !activeDraft.value.allowHttp) throw new Error('Подтвердите передачу текстов по HTTP.')
+  return { base_url: activeDraft.value.baseUrl.trim().replace(/\/+$/, ''), allow_insecure_http: url.protocol === 'http:' && activeDraft.value.allowHttp }
+}
 async function loadCatalog() {
+  const generation = ++catalogGeneration
   catalogError.value = ''
   if (provider.value === 'offline') return
+  if (provider.value === 'crt_mko' && !activeDraft.value.baseUrl.trim()) return
   const name = activeDraft.value.secretName.trim()
   if (provider.value !== 'crt_mko' && !/^[A-Z][A-Z0-9_]*$/.test(name)) { catalogError.value = 'Сначала укажите корректное имя переменной окружения.'; return }
   loadingCatalog.value = true
   try {
     const selectedProvider = provider.value
-    catalogs[selectedProvider] = (await evaluationApi.listProviderModels(selectedProvider, selectedProvider === 'crt_mko' ? undefined : 'env:' + name)).data
+    const rows = (await evaluationApi.listProviderModels(selectedProvider, selectedProvider === 'crt_mko' ? undefined : 'env:' + name, endpointOptions())).data
+    if (generation !== catalogGeneration) return
+    catalogs[selectedProvider] = rows
     if (!drafts[selectedProvider].model && catalogs[selectedProvider].length) drafts[selectedProvider].model = catalogs[selectedProvider][0].id
   } catch (cause) { catalogError.value = explain(cause, 'Не удалось загрузить каталог; identifier можно ввести вручную.') }
   finally { loadingCatalog.value = false }
@@ -103,8 +118,8 @@ async function saveRoute() {
   message.value = ''
   try {
     if (!activeDraft.value.model.trim()) throw new Error('Укажите модель')
-    if (provider.value === 'crt_mko' && !activeDraft.value.allowHttp) throw new Error('Подтвердите передачу текстов по HTTP.')
-    const payload = { provider_name: provider.value, model_identifier: activeDraft.value.model.trim(), capabilities: { modalities: ['text'], ...(provider.value === 'crt_mko' ? { allow_insecure_http: true } : {}) }, credential_ref: credentialRef(), timeout_seconds: activeDraft.value.timeout }
+    const endpoint = endpointOptions()
+    const payload = { provider_name: provider.value, model_identifier: activeDraft.value.model.trim(), capabilities: { modalities: ['text'], ...endpoint }, credential_ref: credentialRef(), timeout_seconds: activeDraft.value.timeout }
     const wasEditing = Boolean(editingId.value)
     const response = wasEditing ? await evaluationApi.updateRoute(editingId.value, payload) : await evaluationApi.createRoute(payload)
     editingId.value = ''
@@ -119,7 +134,7 @@ async function editRoute(route) {
   drafts[provider.value].model = route.model_identifier
   drafts[provider.value].secretName = route.credential_ref?.replace(/^env:/, '') || ''
   drafts[provider.value].timeout = route.timeout_seconds || 60
-  if (provider.value === 'crt_mko') drafts.crt_mko.allowHttp = route.capabilities_json?.allow_insecure_http === true
+  if (provider.value === 'crt_mko') { drafts.crt_mko.allowHttp = route.capabilities_json?.allow_insecure_http === true; drafts.crt_mko.baseUrl = route.capabilities_json?.base_url || '' }
   editingId.value = route.id
   message.value = ''
   await loadCatalog()

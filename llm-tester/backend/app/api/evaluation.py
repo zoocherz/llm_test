@@ -27,7 +27,8 @@ from app.models.evaluation_schemas import RunEvaluationRequest
 from app.models.evaluation_schemas import PromptPreviewRequest, RunRetryRequest
 from app.services.prompt_rendering import render_prompt, TOKEN
 from app.services.judge_evaluation import judge_prompt
-from app.services.v1_providers import EnvironmentSecretResolver, ProviderExecutionError, list_provider_models
+from app.services.v1_providers import EnvironmentSecretResolver, ProviderExecutionError, list_provider_models, crt_base_url
+from app.services.crt_response import final_text
 
 router = APIRouter(prefix="/v1", tags=["evaluation-v1"])
 
@@ -53,6 +54,14 @@ def obj(entity, fields):
     return {field: getattr(entity, field) for field in fields}
 
 
+def validate_route_endpoint(route):
+    if route['provider_name'].lower() == 'crt_mko':
+        try:
+            crt_base_url(route.get('capabilities_json', {}))
+        except ProviderExecutionError as exc:
+            raise HTTPException(422, {'code': exc.code, 'message': exc.message}) from None
+
+
 async def resolve_run_inputs(request: RunEstimateRequest, db: AsyncSession):
     version = await db.get(EvaluationDatasetVersion, str(request.dataset_version_id))
     if not version or version.status != "published":
@@ -63,6 +72,7 @@ async def resolve_run_inputs(request: RunEstimateRequest, db: AsyncSession):
         raise HTTPException(422, "PromptVersion or ModelRoute was not found")
     required_modalities = set(version.schema_json.get("modalities", ["text"]))
     for route in routes:
+        validate_route_endpoint(obj(route, ["provider_name", "capabilities_json"]))
         supported_modalities = set(route.capabilities_json.get("modalities", ["text"]))
         if not required_modalities.issubset(supported_modalities):
             raise HTTPException(422, "Route capability does not satisfy DatasetVersion modalities")
@@ -549,11 +559,11 @@ async def list_model_routes(db: AsyncSession = Depends(get_db)):
     return [{**obj(row, ["id", "provider_name", "model_identifier", "capabilities_json", "credential_ref", "timeout_seconds"]), "credential_available": row.provider_name.lower() in {"offline", "crt_mko"} or resolver.is_available(row.credential_ref)} for row in rows]
 
 @router.get("/provider-models")
-async def provider_models(provider_name: str, credential_ref: str | None = None):
+async def provider_models(provider_name: str, credential_ref: str | None = None, base_url: str | None = None, allow_insecure_http: bool = False):
     try:
-        return await list_provider_models(provider_name, credential_ref)
+        return await list_provider_models(provider_name, credential_ref, base_url=base_url, allow_insecure_http=allow_insecure_http)
     except ProviderExecutionError as exc:
-        status_code = 422 if exc.code in {"unsupported_provider", "credential_unavailable"} else 504 if exc.code == "timeout" else 502
+        status_code = 422 if exc.code in {"unsupported_provider", "credential_unavailable", "endpoint_required", "invalid_endpoint", "insecure_transport"} else 504 if exc.code == "timeout" else 502
         raise HTTPException(status_code, {"code": exc.code, "message": exc.message, "retryable": exc.retryable}) from exc
 
 
@@ -618,6 +628,7 @@ async def create_evaluation(source_id: str, request: RunEvaluationRequest, db: A
     suite = await db.get(EvaluationSuiteVersion, str(request.suite_version_id))
     if not route or not prompt or not suite:
         raise HTTPException(422, 'Judge route, prompt or evaluation suite not found')
+    validate_route_endpoint(obj(route, ['provider_name', 'capabilities_json']))
     if 'text' not in route.capabilities_json.get('modalities', ['text']):
         raise HTTPException(422, 'Judge route must support text')
     if route.provider_name.lower() not in {'offline', 'crt_mko'} and not EnvironmentSecretResolver().is_available(route.credential_ref):
@@ -677,6 +688,11 @@ async def retry_run(run_id: str, request: RunRetryRequest, db: AsyncSession = De
     ids = {str(value) for value in request.item_ids}
     if ids - {row.id for row in rows}:
         raise HTTPException(422, 'Выбраны записи другого запуска или отсутствующие записи.')
+    selected_routes = {r.route_id for r in rows if r.id in ids}
+    snapshot_routes = [run.snapshot_json['judge']['route']] if run.snapshot_json.get('kind') == 'evaluation' else run.snapshot_json.get('routes', [])
+    for saved_route in snapshot_routes:
+        if saved_route['id'] in selected_routes:
+            validate_route_endpoint(saved_route)
     claimed = await db.execute(update(EvaluationRun).where(EvaluationRun.id == run_id, EvaluationRun.status.in_(terminal)).values(status='queued', completed_at=None).execution_options(synchronize_session=False))
     if claimed.rowcount != 1:
         raise HTTPException(409, 'Повтор уже запущен.')
@@ -704,6 +720,7 @@ async def build_run_details(run_id: str, db: AsyncSession):
     captured = run.snapshot_json.get('evaluation_inputs', {}) if run else {}
     items = (await db.execute(select(EvaluationRunItem).where(EvaluationRunItem.run_id == run_id))).scalars().all()
     payload = []
+    snapshot_routes = {r['id']: r for r in (run.snapshot_json.get('routes', []) if run else [])}
     for item in items:
         source = await db.get(EvaluationDatasetItem, item.dataset_item_id)
         attempts = (await db.execute(select(EvaluationAttempt).where(EvaluationAttempt.run_item_id == item.id))).scalars().all()
@@ -714,9 +731,10 @@ async def build_run_details(run_id: str, db: AsyncSession):
         current_results = [r for r in results if (r.value_json or {}).get('_attempt', 0) == latest_sequence] if item.status in {'completed', 'failed'} else []
         payload.append({
             **obj(item, ["id", "dataset_item_id", "prompt_version_id", "route_id", "status", "output_json", "error_json"]),
+            'display_text': final_text((item.output_json or {}).get('text', '')) if isinstance((item.output_json or {}).get('text'), str) and snapshot_routes.get(item.route_id, {}).get('provider_name') == 'crt_mko' else (item.output_json or {}).get('text'),
             "dataset_item": obj(source, ["external_id", "input_json", "reference_json", "metadata_json", "tags_json"]) if source else None,
             'evaluation_source': captured.get(item.id),
-            "attempts": [obj(attempt, ["id", "node_id", "kind", "latency_ms", "output_json", "error_json"]) for attempt in attempts],
+            "attempts": [obj(attempt, ["id", "node_id", "kind", "latency_ms", "output_json", "error_json", "route_snapshot_json"]) for attempt in attempts],
             "results": [obj(result, ["id", "evaluator_id", "status", "value_json", "numeric_score"]) for result in current_results],
             "result_history": [obj(result, ["id", "evaluator_id", "status", "value_json", "numeric_score"]) for result in results],
         })

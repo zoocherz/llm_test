@@ -1,9 +1,10 @@
 <template>
-    <el-card v-if="run" class="space">
+    <el-card v-if="run" class="space result-card">
       <template #header><div class="card-header"><span>Run {{ run.id }}</span><span><el-button size="small" :loading="downloading === 'json'" @click="downloadRun('json')">Экспорт JSON</el-button><el-button size="small" :loading="downloading === 'csv'" @click="downloadRun('csv')">Экспорт CSV</el-button></span></div></template>
       <el-alert v-if="error" :title="error" type="error" show-icon class="space" />
       <div class="space"><el-button v-if="['queued', 'running', 'cancelling'].includes(run.status)" type="danger" plain :disabled="run.status === 'cancelling'" :loading="cancelling" @click="cancelRequested = true">Отменить запуск</el-button><span v-if="run.status === 'cancelling'"> Отмена запрошена: ожидаем окончания текущего запроса, новые не начинаются.</span></div>
       <el-alert v-if="cancelRequested" type="warning" :closable="false"><p>Полученные результаты сохранятся. Уже отправленный запрос может завершиться и быть оплачен провайдером.</p><el-button type="danger" :loading="cancelling" @click="cancelCurrent">Подтвердить отмену запуска</el-button><el-button @click="cancelRequested = false">Продолжить запуск</el-button></el-alert>
+      <RunProgress :run="run" :active-label="activeItemLabel" class="sticky-progress" />
       <el-descriptions :column="3" border>
         <el-alert v-if="error" :title="error" type="error" show-icon class="space" />
       <el-descriptions-item label="Статус">{{ run.status }}</el-descriptions-item>
@@ -43,21 +44,21 @@
         <p v-if="retryIds.length">Будет выполнено {{ retryIds.length }} вызовов. <el-button type="primary" :loading="retrying" @click="retrySelected">Подтвердить повтор</el-button><el-button @click="retryIds = []">Отмена</el-button></p>
         <el-alert v-if="retryError" :title="retryError" type="error" :closable="false" />
       </div>
-      <div class="table-tools"><el-input v-model="itemSearch" clearable placeholder="Поиск примера или текста" /><el-select v-model="itemStatus" clearable placeholder="Любой статус"><el-option v-for="status in ['completed', 'failed', 'queued', 'cancelled']" :key="status" :value="status" :label="status" /></el-select><span>{{ filteredItems.length }} из {{ items.length }}</span></div>
+      <div class="table-tools"><el-input v-model="itemSearch" clearable placeholder="Поиск примера или текста" /><el-select v-model="itemStatus" clearable placeholder="Любой статус"><el-option v-for="status in ['completed', 'failed', 'running', 'queued', 'cancelled']" :key="status" :value="status" :label="status" /></el-select><span>{{ filteredItems.length }} из {{ items.length }}</span></div>
       <el-alert v-if="run.snapshot_json?.suite?.scoring_mode === 'independent' && run.snapshot_json?.kind === 'evaluation'" title="Каждый критерий — отдельная колонка со своей шкалой. «—» означает отсутствие валидной оценки, не ноль. Средние учитывают только успешные оценки." type="info" :closable="false" />
       <el-table :data="filteredItems" max-height="460" row-key="id" empty-text="Нет подходящих записей" @selection-change="rows => selectedIds = rows.map(row => row.id)">
         <el-table-column type="selection" :reserve-selection="true" :selectable="() => canRetry" width="45" fixed />
         <el-table-column label="Действия" width="185" fixed><template #default="{ row }"><el-button link @click="detailId = row.id">Открыть</el-button><el-button link :disabled="!canRetry || retrying" @click="prepareRetry([row.id])">Повторить</el-button></template></el-table-column>
+        <el-table-column prop="status" label="Статус" width="180" sortable fixed><template #default="{ row }"><span v-if="row.status === 'running'" class="row-spinner" aria-hidden="true"></span><span v-else aria-hidden="true">{{ row.status === 'completed' ? '✓' : row.status === 'failed' ? '⚠' : row.status === 'cancelled' ? '■' : '◷' }}</span> {{ itemStatusLabels[row.status] || row.status }}<div v-if="row.status === 'running'">Попытка {{ row.attempts?.at(-1)?.route_snapshot_json?.sequence || row.attempts?.length || 1 }} · HTTP {{ row.attempts?.at(-1)?.route_snapshot_json?.http_attempts || 0 }}</div></template></el-table-column>
         <el-table-column v-for="criterion in run.snapshot_json?.kind === 'evaluation' ? (run.snapshot_json?.suite?.criteria || []) : []" :key="criterion.key" :label="criterion.key + ' (' + (criterion.min_score ?? 0) + '–' + (criterion.max_score ?? 1) + ')'" min-width="150"><template #default="{ row }">{{ row.results?.[0]?.value_json?.scores?.[criterion.key] ?? '—' }}</template></el-table-column>
         <el-table-column label="Пример" width="150"><template #default="{ row }">{{ row.dataset_item?.external_id || shortId(row.dataset_item_id) }}</template></el-table-column>
-        <el-table-column prop="status" label="Статус" width="120" sortable />
         <el-table-column label="Модель" min-width="210"><template #default="{ row }">{{ routeLabel(row.route_id) }}</template></el-table-column>
         <el-table-column label="Результат" min-width="260"><template #default="{ row }"><div class="result-preview">{{ itemResultText(row) }}</div></template></el-table-column>
         <el-table-column v-if="run.snapshot_json?.suite?.scoring_mode !== 'independent'" label="Оценка" width="100"><template #default="{ row }">{{ row.results?.[0]?.numeric_score ?? '—' }}</template></el-table-column>
-        <el-table-column label="История" width="140"><template #default="{ row }"><el-popover trigger="click" width="600"><template #reference><el-button link>Попытки: {{ row.attempts?.length || 0 }}</el-button></template><div style="max-height: 400px; overflow: auto"><div v-for="(attempt, index) in row.attempts" :key="attempt.id"><b>Попытка {{ index + 1 }} · {{ attempt.error_json ? 'ошибка' : 'ответ' }}</b><pre style="white-space: pre-wrap">{{ prettyJson(attempt.output_json || attempt.error_json) }}</pre></div><b>История оценок</b><pre style="white-space: pre-wrap">{{ prettyJson(row.result_history) }}</pre></div></el-popover></template></el-table-column>
+        <el-table-column label="История" width="140"><template #default="{ row }"><el-popover trigger="click" width="600"><template #reference><el-button link>Попытки: {{ row.attempts?.length || 0 }}</el-button></template><div style="max-height: 400px; overflow: auto"><div v-for="(attempt, index) in row.attempts" :key="attempt.id"><b>Попытка {{ index + 1 }} · {{ attempt.error_json ? 'ошибка' : attempt.latency_ms == null ? 'выполняется' : 'ответ' }} · HTTP {{ attempt.route_snapshot_json?.http_attempts ?? '—' }}</b><pre style="white-space: pre-wrap">{{ prettyJson(attempt.output_json || attempt.error_json) }}</pre></div><b>История оценок</b><pre style="white-space: pre-wrap">{{ prettyJson(row.result_history) }}</pre></div></el-popover></template></el-table-column>
         <el-table-column label="Время" width="120"><template #default="{ row }">{{ itemLatency(row) ? itemLatency(row) + ' мс' : '—' }}</template></el-table-column>
       </el-table>
-      <el-drawer :model-value="Boolean(detailId)" title="Подробности записи" size="min(780px, 100vw)" @close="detailId = ''"><template v-if="detailItem"><el-button :disabled="!canRetry" @click="prepareRetry([detailId]); detailId = ''">Повторить эту запись</el-button><h3>Ответ / ошибка</h3><pre>{{ prettyJson(detailItem.output_json || detailItem.error_json) }}</pre><h3>Вход и эталон</h3><pre>{{ prettyJson(detailItem.dataset_item) }}</pre><h3>Оценки по критериям</h3><pre>{{ prettyJson(detailItem.results) }}</pre><h3>Предыдущие попытки</h3><pre>{{ prettyJson({ attempts: detailItem.attempts, evaluations: detailItem.result_history }) }}</pre></template></el-drawer>
+      <el-drawer :model-value="Boolean(detailId)" title="Подробности записи" size="min(780px, 100vw)" @close="detailId = ''"><template v-if="detailItem"><el-button :disabled="!canRetry" @click="prepareRetry([detailId]); detailId = ''">Повторить эту запись</el-button><h3>Ответ / ошибка</h3><pre class="answer-text">{{ itemResultText(detailItem) }}</pre><p v-if="detailItem.output_json?.raw_text || (detailItem.display_text != null && detailItem.display_text !== detailItem.output_json?.text)">Служебная разметка отделена. Исходный ответ сохранён ниже.</p><el-collapse><el-collapse-item title="Исходный ответ и технические данные"><pre>{{ detailItem.output_json?.raw_text || detailItem.output_json?.text || detailItem.error_json?.message }}</pre><pre>{{ prettyJson(detailItem.output_json || detailItem.error_json) }}</pre></el-collapse-item></el-collapse><h3>Вход и эталон</h3><pre>{{ prettyJson(detailItem.dataset_item) }}</pre><h3>Оценки по критериям</h3><pre>{{ prettyJson(detailItem.results) }}</pre><h3>Предыдущие попытки</h3><pre>{{ prettyJson({ attempts: detailItem.attempts, evaluations: detailItem.result_history }) }}</pre></template></el-drawer>
       <RunEvaluationPanel v-if="run.snapshot_json?.kind !== 'evaluation'" :run="run" :items="items" />
       <el-collapse class="space"><el-collapse-item title="Снимок конфигурации Run"><pre>{{ prettyJson(run.snapshot_json) }}</pre></el-collapse-item></el-collapse>
     </el-card>
@@ -66,11 +67,14 @@
 import { computed, ref, toRefs } from 'vue'
 import { evaluationApi } from '../api'
 import RunEvaluationPanel from './RunEvaluationPanel.vue'
+import RunProgress from './RunProgress.vue'
 import { explain, providerErrorMessages } from '../utils/evaluationErrors'
 const props = defineProps({ run: { type: Object, required: true }, items: { type: Array, default: () => [] }, routes: { type: Array, default: () => [] } })
 const emit = defineEmits(['retried'])
 const { run, items, routes } = toRefs(props)
 const downloading = ref(''), error = ref('')
+const itemStatusLabels = { running: 'Выполняется', queued: 'В очереди', completed: 'Готово', failed: 'Ошибка', cancelled: 'Отменено' }
+const activeItemLabel = computed(() => { const row = items.value.find(item => item.id === run.value.progress_json?.active_item_id); return row ? (row.dataset_item?.external_id || shortId(row.id)) + ' · ' + routeLabel(row.route_id) : '' })
 const cancelling = ref(false), cancelRequested = ref(false), detailId = ref(''), itemSearch = ref(''), itemStatus = ref('')
 const detailItem = computed(() => items.value.find(row => row.id === detailId.value))
 const filteredItems = computed(() => items.value.filter(row => (!itemStatus.value || row.status === itemStatus.value) && (!itemSearch.value || [row.dataset_item?.external_id, row.output_json?.text, row.error_json?.message].join(' ').toLowerCase().includes(itemSearch.value.toLowerCase()))))
@@ -108,9 +112,11 @@ function routeLabel(routeId) {
 
 function itemResultText(row) {
   if (row.error_json?.code === 'invalid_judge_response') return row.error_json.message || providerErrorMessages.invalid_judge_response
+  if (row.display_text != null) return row.display_text.trim() ? row.display_text : 'Финальный текст отсутствует: получены только служебные блоки. Исходный ответ сохранён.'
   if (row.output_json?.text?.trim()) return row.output_json.text
   if (row.status === 'queued') return 'Ожидает обработки'
   if (row.status === 'running') return 'Обрабатывается'
+  if (row.error_json?.code === 'timeout' && row.error_json.message?.includes('snapshot')) return row.error_json.message
   const providerMessage = providerErrorMessages[row.error_json?.code]
   if (providerMessage) return providerMessage
   if (row.error_json?.code?.startsWith('http_')) return 'Провайдер отклонил запрос (' + row.error_json.code.replace('_', ' ').toUpperCase() + ').'
@@ -162,6 +168,12 @@ async function downloadRun(format) {
 
 </script>
 <style scoped>
+.result-card { overflow: visible; }
+.sticky-progress { position: sticky; top: 8px; z-index: 5; margin: 12px 0; box-shadow: 0 2px 10px #0001; }
+.row-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--el-border-color); border-top-color: var(--el-color-primary); border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .row-spinner { animation: none; } }
+
 .result-preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .table-tools { display: flex; gap: 10px; margin: 12px 0; }
 .table-tools .el-input { max-width: 320px; }

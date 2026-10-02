@@ -3,6 +3,7 @@ from typing import Any, Literal
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.services.prompt_rendering import validate_prompt
+from app.services.v1_providers import crt_base_url, ProviderExecutionError
 class DatasetCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200); description: str | None = None; schema: dict[str, Any] = Field(default_factory=dict)
 class DatasetVersionCreateRequest(BaseModel):
@@ -43,8 +44,10 @@ class RouteCreateRequest(BaseModel):
     @model_validator(mode="after")
     def validate_transport(self):
         if self.provider_name.lower() == "crt_mko":
-            if self.capabilities.get("allow_insecure_http") is not True:
-                raise ValueError("ЦРТ МКО использует HTTP: подтвердите передачу текстов без шифрования.")
+            try:
+                self.capabilities["base_url"] = crt_base_url(self.capabilities)
+            except ProviderExecutionError as exc:
+                raise ValueError(exc.message) from None
             if self.credential_ref is not None:
                 raise ValueError("ЦРТ МКО не использует ключ. Уберите ссылку на секрет.")
         return self

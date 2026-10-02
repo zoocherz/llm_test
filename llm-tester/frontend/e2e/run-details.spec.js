@@ -68,3 +68,26 @@ test('leaving the runs section stops updates', async ({ page }) => {
   await page.waitForTimeout(1500)
   expect(calls).toBe(afterLeaving)
 })
+
+
+test('live progress is visible outside history and answers render as text', async ({ page }) => {
+  await mockLists(page)
+  const run = { ...makeRun('run-a', 'running'), kind: 'evaluation', progress_json: { total: 4, completed: 2, failed: 1, active_item_id: 'item-a', attempt: 2, http_attempt: 1, active_started_at: new Date().toISOString(), timeout_seconds: 120 } }
+  const details = [{ id: 'item-a', dataset_item: { external_id: 'example-a' }, route_id: 'deleted-route', status: 'running', attempts: [{ id: 'attempt-a', route_snapshot_json: { http_attempts: 1 }, latency_ms: null }] }, { id: 'item-b', dataset_item: { external_id: 'example-b' }, route_id: 'deleted-route', status: 'completed', output_json: { text: 'first line\nsecond line', raw_text: '<thought>synthetic hidden reasoning</thought>first line\nsecond line' }, attempts: [] }]
+  await page.route('**/api/v1/runs', route => route.fulfill({ json: [run] }))
+  await page.route('**/api/v1/runs/run-a', route => route.fulfill({ json: run }))
+  await page.route('**/api/v1/runs/run-a/details', route => route.fulfill({ json: details }))
+  await page.goto('/runs/run-a')
+  const progress = page.locator('.sticky-progress')
+  await expect(progress.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50')
+  await expect(progress).toContainText('попытка 2')
+  await expect(page.locator('.row-spinner')).toHaveCount(1)
+  await page.screenshot({ path: 'test-results/live-progress.png', fullPage: true })
+  await page.getByRole('row').filter({ hasText: 'example-b' }).getByRole('button', { name: 'Открыть', exact: true }).click()
+  await expect(page.locator('.answer-text')).toHaveText('first line\nsecond line')
+  await expect(page.locator('.answer-text')).not.toContainText('thought')
+  await page.locator('.el-drawer__close-btn').click()
+  await page.getByRole('menuitem', { name: 'Модели', exact: true }).click()
+  await expect(page.getByRole('complementary', { name: 'Активные запуски' })).toContainText('run-a')
+  await expect(page.getByRole('complementary', { name: 'Активные запуски' }).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50')
+})

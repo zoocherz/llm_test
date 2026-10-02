@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from urllib.parse import urlsplit
+from app.services.crt_response import final_text
 from dataclasses import dataclass, field
 from typing import Literal
 import httpx
@@ -103,14 +105,32 @@ class OpenRouterChatAdapter:
         return {"text": text, "finish_reason": data["choices"][0].get("finish_reason"), "usage": {"prompt": usage.get("prompt_tokens", 0), "completion": usage.get("completion_tokens", 0), "total": usage.get("total_tokens", 0), "cost": data.get("cost")}}
 
 
+def crt_base_url(capabilities: dict) -> str:
+    value = capabilities.get('base_url')
+    if not isinstance(value, str) or not value.strip():
+        raise ProviderExecutionError('endpoint_required', 'Укажите адрес API ЦРТ МКО в подключении. Для старого snapshot без адреса создайте новый запуск.')
+    value = value.strip().rstrip('/')
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        valid = (parsed.scheme in {'http', 'https'} and parsed.hostname and not parsed.username
+                 and not parsed.password and not parsed.query and not parsed.fragment
+                 and not any(char.isspace() or ord(char) < 32 for char in value) and '\\' not in value)
+        if not valid: raise ValueError()
+    except ValueError:
+        raise ProviderExecutionError('invalid_endpoint', 'Укажите HTTP/HTTPS адрес API без логина, пароля, параметров и фрагмента.') from None
+    if parsed.scheme == 'http' and capabilities.get('allow_insecure_http') is not True:
+        raise ProviderExecutionError('insecure_transport', 'Подтвердите передачу текстов по HTTP в настройке ЦРТ МКО.')
+    return value
+
+
 class CrtMkoAdapter:
-    base_url = "http://super-project-work.ru:8001/api/v1"
 
     @staticmethod
-    def build_request(request: NormalizedGenerationRequest, api_key: str = ""):
+    def build_request(request: NormalizedGenerationRequest, api_key: str = "", *, base_url: str):
         if request.images:
             raise ProviderExecutionError("unsupported_modality", "ЦРТ МКО: поддержан только текст.")
-        return CrtMkoAdapter.base_url + "/completions", {"Content-Type": "application/json"}, {
+        return base_url + "/completions", {"Content-Type": "application/json"}, {
             "model": request.model, "engine": "stc_llama", "input_text": request.prompt,
             "temperature": request.temperature, "stream": False,
             "exclude_from_history": True, "exclude_context": True,
@@ -126,11 +146,16 @@ class CrtMkoAdapter:
         prompt, completion = data.get("prompt_eval_count", 0), data.get("eval_count", 0)
         prompt = prompt if type(prompt) is int and prompt >= 0 else 0
         completion = completion if type(completion) is int and completion >= 0 else 0
-        return {"text": message["content"], "finish_reason": data.get("done_reason"),
-                "usage": {"prompt": prompt, "completion": completion, "total": prompt + completion}}
+        text = final_text(message['content'])
+        result = {"text": text, "finish_reason": data.get("done_reason"),
+                  "usage": {"prompt": prompt, "completion": completion, "total": prompt + completion}}
+        if text != message['content']:
+            result['raw_text'] = message['content']
+            result['normalization'] = 'crt_final_text_v1'
+        return result
 
 
-async def list_provider_models(provider_name: str, credential_ref: str | None, transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:
+async def list_provider_models(provider_name: str, credential_ref: str | None, transport: httpx.AsyncBaseTransport | None = None, *, base_url: str | None = None, allow_insecure_http: bool = False) -> list[dict]:
     provider = provider_name.lower()
     if provider not in {"google", "openrouter", "crt_mko"}:
         raise ProviderExecutionError("unsupported_provider", "Provider model catalog is not supported")
@@ -146,7 +171,7 @@ async def list_provider_models(provider_name: str, credential_ref: str | None, t
         url = f"{GoogleGenerateContentAdapter.base_url}/models?pageSize=1000"
         headers = {"x-goog-api-key": api_key}
     elif provider == "crt_mko":
-        url, headers = CrtMkoAdapter.base_url + "/models", {}
+        url, headers = crt_base_url({"base_url": base_url, "allow_insecure_http": allow_insecure_http}) + "/models", {}
     else:
         url = f"{OpenRouterChatAdapter.base_url}/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -157,7 +182,7 @@ async def list_provider_models(provider_name: str, credential_ref: str | None, t
         raise ProviderExecutionError("timeout", "Provider model catalog timed out", True) from exc
     except httpx.TransportError as exc:
         raise ProviderExecutionError("network_error", "Provider model catalog request failed", True) from exc
-    if response.status_code >= 400:
+    if response.status_code >= 300:
         raise ProviderExecutionError(f"http_{response.status_code}", "Provider model catalog returned an HTTP error", response.status_code in {408, 429} or response.status_code >= 500)
     try:
         payload = response.json()
@@ -193,39 +218,52 @@ async def list_provider_models(provider_name: str, credential_ref: str | None, t
             models.append({"id": model_id, "display_name": raw.get("name") or model_id, "provider_name": provider, "is_free": is_free, "context_window": raw.get("context_length"), "input_modalities": architecture.get("input_modalities") or ["text"], "output_modalities": architecture.get("output_modalities") or ["text"]})
     return sorted(models, key=lambda item: (item["is_free"] is not True, item["id"] != "openrouter/free", item["display_name"].lower()))
 
-async def generate_external(route: dict, request: NormalizedGenerationRequest, attempts: int = 2, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+async def generate_external(route: dict, request: NormalizedGenerationRequest, attempts: int = 2, transport: httpx.AsyncBaseTransport | None = None, on_attempt=None) -> dict:
     provider = route["provider_name"].lower()
     adapter = {"google": GoogleGenerateContentAdapter, "openrouter": OpenRouterChatAdapter, "crt_mko": CrtMkoAdapter}.get(provider)
     if adapter is None:
         raise ProviderExecutionError("unsupported_provider", "ModelRoute provider is not supported by v1 executor")
     ref = route.get("credential_ref")
-    if provider == "crt_mko" and route.get("capabilities_json", {}).get("allow_insecure_http") is not True:
-        raise ProviderExecutionError("insecure_transport", "Подтвердите передачу текстов по HTTP в настройке ЦРТ МКО.")
+    endpoint = crt_base_url(route.get("capabilities_json", {})) if provider == "crt_mko" else None
     if not ref and provider != "crt_mko":
         raise ProviderExecutionError("credential_unavailable", "ModelRoute has no credential reference")
     try:
         api_key = "" if provider == "crt_mko" else EnvironmentSecretResolver().resolve(ref)
     except ProviderConfigurationError as exc:
         raise ProviderExecutionError("credential_unavailable", "ModelRoute credential is unavailable") from exc
-    url, headers, payload = adapter.build_request(request, api_key)
+    url, headers, payload = adapter.build_request(request, api_key, base_url=endpoint) if provider == "crt_mko" else adapter.build_request(request, api_key)
     timeout = route.get("timeout_seconds", 60)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    error = ProviderExecutionError("timeout", "Provider request timed out", True)
+    timeout_message = f"Провайдер не завершил ответ за {timeout} с. Увеличьте ожидание подключения для нового запуска; повтор использует прежний snapshot."
+    error = ProviderExecutionError("timeout", timeout_message, True)
     for attempt in range(attempts):
+        if on_attempt is not None:
+            await on_attempt(attempt + 1)
         remaining = deadline - loop.time()
         if remaining <= 0:
-            raise ProviderExecutionError("timeout", "Provider request timed out", True)
+            raise ProviderExecutionError("timeout", timeout_message, True)
         try:
             async with asyncio.timeout(remaining):
                 async with httpx.AsyncClient(timeout=remaining, transport=transport) as client:
                     response = await client.post(url, headers=headers, json=payload)
-            if response.status_code >= 400:
+            if response.status_code >= 300:
                 retryable = response.status_code in {408, 429} or response.status_code >= 500
                 raise ProviderExecutionError(f"http_{response.status_code}", "Provider returned an HTTP error", retryable)
-            return adapter.parse_response(response.json())
+            try:
+                data = response.json()
+            except ValueError:
+                raise ProviderExecutionError('invalid_json', 'Провайдер вернул не JSON. Проверьте адрес API и состояние сервера; тело ответа не сохранялось.') from None
+            if not isinstance(data, dict):
+                raise ProviderExecutionError('invalid_response', 'Провайдер вернул неверную структуру ответа.')
+            if data.get('error'):
+                raise ProviderExecutionError('provider_error', 'Сервис вернул ошибку внутри ответа HTTP 200. Проверьте журнал сервера.')
+            try:
+                return adapter.parse_response(data)
+            except (KeyError, IndexError, TypeError, AttributeError, ValueError):
+                raise ProviderExecutionError('invalid_response', 'Провайдер вернул неверную структуру ответа.') from None
         except (httpx.TimeoutException, TimeoutError):
-            error = ProviderExecutionError("timeout", "Provider request timed out", True)
+            error = ProviderExecutionError("timeout", timeout_message, True)
         except httpx.TransportError:
             error = ProviderExecutionError("network_error", "Provider request failed", True)
         except ProviderExecutionError as exc:
@@ -234,6 +272,6 @@ async def generate_external(route: dict, request: NormalizedGenerationRequest, a
             raise error
         delay = 0.2 * (attempt + 1)
         if deadline - loop.time() <= delay:
-            raise ProviderExecutionError("timeout", "Provider request timed out", True)
+            raise ProviderExecutionError("timeout", timeout_message, True)
         await asyncio.sleep(delay)
     raise error
