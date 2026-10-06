@@ -55,6 +55,12 @@ def obj(entity, fields):
 
 
 def validate_route_endpoint(route):
+    from app.services.additional_providers import PRESETS, checked_caps
+    if route['provider_name'].lower() in PRESETS:
+        try:
+            checked_caps(route['provider_name'].lower(), route.get('capabilities_json', {}))
+        except ProviderExecutionError as exc:
+            raise HTTPException(422, {'code': exc.code, 'message': exc.message}) from None
     if route['provider_name'].lower() == 'crt_mko':
         try:
             crt_base_url(route.get('capabilities_json', {}))
@@ -558,12 +564,18 @@ async def list_model_routes(db: AsyncSession = Depends(get_db)):
     resolver = EnvironmentSecretResolver()
     return [{**obj(row, ["id", "provider_name", "model_identifier", "capabilities_json", "credential_ref", "timeout_seconds"]), "credential_available": row.provider_name.lower() in {"offline", "crt_mko"} or resolver.is_available(row.credential_ref)} for row in rows]
 
+@router.get("/provider-presets")
+async def provider_presets():
+    from app.services.additional_providers import public_presets
+    return public_presets()
+
+
 @router.get("/provider-models")
-async def provider_models(provider_name: str, credential_ref: str | None = None, base_url: str | None = None, allow_insecure_http: bool = False):
+async def provider_models(provider_name: str, credential_ref: str | None = None, base_url: str | None = None, allow_insecure_http: bool = False, auth_mode: str = "oauth", scope: str = "GIGACHAT_API_PERS", folder_id: str | None = None):
     try:
-        return await list_provider_models(provider_name, credential_ref, base_url=base_url, allow_insecure_http=allow_insecure_http)
+        return await list_provider_models(provider_name, credential_ref, base_url=base_url, allow_insecure_http=allow_insecure_http, auth_mode=auth_mode, scope=scope, folder_id=folder_id)
     except ProviderExecutionError as exc:
-        status_code = 422 if exc.code in {"unsupported_provider", "credential_unavailable", "endpoint_required", "invalid_endpoint", "insecure_transport"} else 504 if exc.code == "timeout" else 502
+        status_code = 422 if exc.code in {"unsupported_provider", "credential_unavailable", "endpoint_required", "invalid_endpoint", "insecure_transport", "invalid_provider_config", "catalog_unavailable"} else 504 if exc.code == "timeout" else 502
         raise HTTPException(status_code, {"code": exc.code, "message": exc.message, "retryable": exc.retryable}) from exc
 
 

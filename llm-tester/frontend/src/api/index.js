@@ -14,6 +14,7 @@ export const tasksApi = {
   getRunResults: (id) => api.get('/tasks/runs/' + id + '/results'), exportResults: (id, format) => api.get('/tasks/runs/' + id + '/export', { params: { format }, responseType: 'blob' }),
 }
 export const evaluationApi = {
+  listProviderPresets: () => api.get('/v1/provider-presets'),
   previewPrompt: (data) => api.post('/v1/prompts:preview', data),
   createEvaluation: (id, data) => api.post('/v1/runs/' + id + '/evaluations', data),
   listEvaluations: (id) => api.get('/v1/runs/' + id + '/evaluations'),

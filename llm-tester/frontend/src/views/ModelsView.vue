@@ -4,15 +4,19 @@
       <template #header><div><b>Модели</b><div class="hint">Настройте подключения, затем используйте одну модель как candidate, генератор данных или Judge.</div></div></template>
       <el-alert v-if="error" :title="error" type="error" show-icon class="space" />
       <el-form label-position="top" class="route-form">
-        <el-form-item label="Сервис модели"><el-select v-model="provider" @change="loadCatalog"><el-option label="Offline — без внешнего API" value="offline" /><el-option label="Google Gemini" value="google" /><el-option label="OpenRouter" value="openrouter" /><el-option label="ЦРТ МКО — без авторизации" value="crt_mko" /></el-select></el-form-item>
+        <el-form-item label="Сервис модели"><el-select v-model="provider" @change="providerChanged"><el-option label="Offline — без внешнего API" value="offline" /><el-option label="Google Gemini" value="google" /><el-option label="OpenRouter" value="openrouter" /><el-option label="ЦРТ МКО — без авторизации" value="crt_mko" /><el-option v-for="preset in presets" :key="preset.id" :label="preset.label" :value="preset.id" /></el-select></el-form-item>
         <el-form-item label="Модель">
-          <el-input v-if="provider === 'offline'" v-model="activeDraft.model" />
+          <el-input v-if="provider === 'offline' || activePreset?.catalog === false" v-model="activeDraft.model" />
           <div v-else class="model-picker"><el-select v-model="activeDraft.model" filterable allow-create default-first-option :loading="loadingCatalog" placeholder="Найдите или введите модель"><el-option v-for="model in visibleCatalog" :key="model.id" :value="model.id" :label="model.display_name + ' · ' + model.id"><span>{{ model.display_name }} · {{ model.id }}</span><el-tag v-if="model.is_free" type="success" size="small">бесплатно</el-tag></el-option></el-select><el-button :loading="loadingCatalog" @click="loadCatalog">Обновить список</el-button></div>
-          <span v-if="provider !== 'offline'" class="field-help">Каталог загружается через backend. Ручной identifier остаётся fallback.</span>
+          <span v-if="provider !== 'offline'" class="field-help">{{ activePreset?.catalog === false ? 'Введите точный ID текстовой модели из кабинета сервиса.' : 'Нажмите «Обновить список» для загрузки каталога. ID можно ввести вручную; выберите текстовую chat-модель.' }}</span>
           <el-checkbox v-if="provider === 'openrouter'" v-model="freeOnly">Только бесплатные модели</el-checkbox>
         </el-form-item>
         <el-form-item v-if="!['offline', 'crt_mko'].includes(provider)" label="Имя переменной с ключом"><el-input v-model="activeDraft.secretName" placeholder="GOOGLE_API_KEY" /><span class="field-help">Укажите только имя; значение ключа не передаётся браузеру.</span></el-form-item>
         <el-form-item v-if="provider === 'crt_mko'" label="Адрес API ЦРТ МКО"><el-input v-model="activeDraft.baseUrl" placeholder="https://mko.example.org:8443/api/v1" @input="endpointChanged" /><span class="field-help">Полный адрес API: сервер, порт и путь (обычно /api/v1). Без авторизации. Сначала укажите адрес, затем обновите список моделей. Лимит выходных токенов пока не гарантируется.</span><el-checkbox v-if="activeDraft.baseUrl.trim().toLowerCase().startsWith('http:')" v-model="activeDraft.allowHttp">Разрешаю передачу выбранных данных по HTTP</el-checkbox></el-form-item>
+        <el-form-item v-if="activePreset" label="Адрес API сервиса"><el-input v-model="activeDraft.baseUrl" placeholder="https://service.example/v1" @input="endpointChanged" /><span class="field-help">Ключ будет отправлен этому HTTPS адресу. {{ activePreset.help }} Параметры sampling используются по умолчанию сервиса; лимит ответа задаётся при запуске.</span></el-form-item>
+        <el-form-item v-if="provider === 'gigachat'" label="Тип ключа GigaChat"><el-select v-model="activeDraft.authMode"><el-option label="Ключ авторизации → OAuth" value="oauth" /><el-option label="Готовый access token" value="access_token" /></el-select><span class="field-help">Значение хранится в указанной переменной окружения. Access token имеет срок действия.</span></el-form-item>
+        <el-form-item v-if="provider === 'gigachat'" label="Scope GigaChat"><el-select v-model="activeDraft.scope"><el-option v-for="scope in ['GIGACHAT_API_PERS','GIGACHAT_API_B2B','GIGACHAT_API_CORP']" :key="scope" :label="scope" :value="scope" /></el-select></el-form-item>
+        <el-form-item v-if="provider === 'yandex'" label="ID каталога Yandex Cloud"><el-input v-model="activeDraft.folderId" placeholder="folder ID" /></el-form-item>
         <el-form-item label="Максимальное ожидание"><el-input-number v-model="activeDraft.timeout" :min="1" :max="600" /><span class="field-help">секунд на весь вызов, включая HTTP-повторы. После таймаута увеличьте ожидание и создайте новый запуск: старый повтор сохраняет прежний лимит.</span></el-form-item>
         <el-form-item><el-button type="primary" :loading="saving" @click="saveRoute">{{ editingId ? 'Сохранить изменения' : 'Сохранить подключение' }}</el-button><el-button v-if="editingId" @click="cancelEdit">Отменить изменение</el-button></el-form-item>
       </el-form>
@@ -40,6 +44,8 @@ import { ElMessageBox } from 'element-plus'
 import { evaluationApi } from '../api'
 
 const routes = ref([])
+const presets = ref([])
+const activePreset = computed(() => presets.value.find(preset => preset.id === provider.value))
 const loading = ref(false)
 const saving = ref(false)
 const deletingId = ref('')
@@ -68,6 +74,7 @@ const providerMessages = {
 function explain(cause, fallback) {
   const detail = cause.response?.data?.detail
   if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map(item => item.msg).filter(Boolean).join('; ') || fallback
   if (detail?.code && providerMessages[detail.code]) return providerMessages[detail.code]
   if (detail?.message) return detail.message
   return cause.message || fallback
@@ -86,12 +93,17 @@ async function loadRoutes() {
   finally { loading.value = false }
 }
 let catalogGeneration = 0
-function endpointChanged() { catalogGeneration += 1; catalogs.crt_mko = []; drafts.crt_mko.allowHttp = false; catalogError.value = '' }
+function endpointChanged() { loadingCatalog.value = false; catalogGeneration += 1; catalogs[provider.value] = []; if (provider.value === 'crt_mko') drafts.crt_mko.allowHttp = false; catalogError.value = '' }
 function endpointOptions() {
-  if (provider.value !== 'crt_mko') return {}
+  if (provider.value !== 'crt_mko' && !activePreset.value) return {}
   let url
-  try { url = new URL(activeDraft.value.baseUrl.trim()) } catch { throw new Error('Укажите полный адрес API ЦРТ МКО.') }
+  try { url = new URL(activeDraft.value.baseUrl.trim()) } catch { throw new Error('Укажите полный адрес API сервиса.') }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Нужен HTTP/HTTPS адрес без логина, пароля и параметров.')
+  if (activePreset.value) {
+    if (url.protocol !== 'https:') throw new Error('Для этого сервиса требуется HTTPS.')
+    if (provider.value === 'yandex' && !/^[A-Za-z0-9_-]{1,100}$/.test(activeDraft.value.folderId)) throw new Error('Укажите ID каталога Yandex Cloud.')
+    return { base_url: activeDraft.value.baseUrl.trim().replace(/\/+$/, ''), ...(provider.value === 'gigachat' ? { auth_mode: activeDraft.value.authMode, scope: activeDraft.value.scope } : {}), ...(provider.value === 'yandex' ? { folder_id: activeDraft.value.folderId } : {}) }
+  }
   if (url.protocol === 'http:' && !activeDraft.value.allowHttp) throw new Error('Подтвердите передачу текстов по HTTP.')
   return { base_url: activeDraft.value.baseUrl.trim().replace(/\/+$/, ''), allow_insecure_http: url.protocol === 'http:' && activeDraft.value.allowHttp }
 }
@@ -99,6 +111,7 @@ async function loadCatalog() {
   const generation = ++catalogGeneration
   catalogError.value = ''
   if (provider.value === 'offline') return
+  if (activePreset.value?.catalog === false) { catalogError.value = 'Введите ID модели вручную из кабинета сервиса.'; return }
   if (provider.value === 'crt_mko' && !activeDraft.value.baseUrl.trim()) return
   const name = activeDraft.value.secretName.trim()
   if (provider.value !== 'crt_mko' && !/^[A-Z][A-Z0-9_]*$/.test(name)) { catalogError.value = 'Сначала укажите корректное имя переменной окружения.'; return }
@@ -109,8 +122,8 @@ async function loadCatalog() {
     if (generation !== catalogGeneration) return
     catalogs[selectedProvider] = rows
     if (!drafts[selectedProvider].model && catalogs[selectedProvider].length) drafts[selectedProvider].model = catalogs[selectedProvider][0].id
-  } catch (cause) { catalogError.value = explain(cause, 'Не удалось загрузить каталог; identifier можно ввести вручную.') }
-  finally { loadingCatalog.value = false }
+  } catch (cause) { if (generation === catalogGeneration) catalogError.value = explain(cause, 'Не удалось загрузить каталог; identifier можно ввести вручную.') }
+  finally { if (generation === catalogGeneration) loadingCatalog.value = false }
 }
 async function saveRoute() {
   saving.value = true
@@ -134,10 +147,11 @@ async function editRoute(route) {
   drafts[provider.value].model = route.model_identifier
   drafts[provider.value].secretName = route.credential_ref?.replace(/^env:/, '') || ''
   drafts[provider.value].timeout = route.timeout_seconds || 60
+  if (activePreset.value) { Object.assign(activeDraft.value, { baseUrl: route.capabilities_json?.base_url ?? activePreset.value.base_url, authMode: route.capabilities_json?.auth_mode || 'oauth', scope: route.capabilities_json?.scope || 'GIGACHAT_API_PERS', folderId: route.capabilities_json?.folder_id || '' }) }
   if (provider.value === 'crt_mko') { drafts.crt_mko.allowHttp = route.capabilities_json?.allow_insecure_http === true; drafts.crt_mko.baseUrl = route.capabilities_json?.base_url || '' }
   editingId.value = route.id
   message.value = ''
-  await loadCatalog()
+  if (!activePreset.value) await loadCatalog()
 }
 function cancelEdit() { editingId.value = ''; message.value = 'Изменение отменено.' }
 async function deleteRoute(route) {
@@ -154,7 +168,20 @@ async function deleteRoute(route) {
   finally { deletingId.value = '' }
 }
 
-onMounted(loadRoutes)
+function providerChanged() {
+  catalogGeneration += 1; loadingCatalog.value = false; catalogError.value = ''; error.value = ''
+  if (!activePreset.value) loadCatalog()
+}
+onMounted(async () => {
+  await loadRoutes()
+  try {
+    presets.value = (await evaluationApi.listProviderPresets()).data
+    for (const preset of presets.value) {
+      drafts[preset.id] = { model: '', secretName: preset.secret_name, timeout: 120, baseUrl: preset.base_url, authMode: 'oauth', scope: 'GIGACHAT_API_PERS', folderId: '' }
+      catalogs[preset.id] = []
+    }
+  } catch (cause) { error.value = explain(cause, 'Не удалось загрузить список новых сервисов.') }
+})
 </script>
 
 <style scoped>

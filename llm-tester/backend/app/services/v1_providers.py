@@ -155,8 +155,18 @@ class CrtMkoAdapter:
         return result
 
 
-async def list_provider_models(provider_name: str, credential_ref: str | None, transport: httpx.AsyncBaseTransport | None = None, *, base_url: str | None = None, allow_insecure_http: bool = False) -> list[dict]:
+async def list_provider_models(provider_name: str, credential_ref: str | None, transport: httpx.AsyncBaseTransport | None = None, *, base_url: str | None = None, allow_insecure_http: bool = False, auth_mode: str = "oauth", scope: str = "GIGACHAT_API_PERS", folder_id: str | None = None) -> list[dict]:
     provider = provider_name.lower()
+    from app.services.additional_providers import PRESETS, checked_caps, list_models
+    if provider in PRESETS:
+        caps = {'auth_mode': auth_mode, 'scope': scope, 'folder_id': folder_id}
+        if base_url is not None: caps['base_url'] = base_url
+        caps = checked_caps(provider, caps)
+        try:
+            key = EnvironmentSecretResolver().resolve(credential_ref or '')
+        except ProviderConfigurationError:
+            raise ProviderExecutionError('credential_unavailable', 'Ключ сервиса не найден в окружении backend.') from None
+        return await list_models(provider, key, caps, transport)
     if provider not in {"google", "openrouter", "crt_mko"}:
         raise ProviderExecutionError("unsupported_provider", "Provider model catalog is not supported")
     api_key = None
@@ -220,8 +230,11 @@ async def list_provider_models(provider_name: str, credential_ref: str | None, t
 
 async def generate_external(route: dict, request: NormalizedGenerationRequest, attempts: int = 2, transport: httpx.AsyncBaseTransport | None = None, on_attempt=None) -> dict:
     provider = route["provider_name"].lower()
+    from app.services import additional_providers as extra
+    extended = provider in extra.PRESETS
+    caps = extra.checked_caps(provider, route.get("capabilities_json", {})) if extended else None
     adapter = {"google": GoogleGenerateContentAdapter, "openrouter": OpenRouterChatAdapter, "crt_mko": CrtMkoAdapter}.get(provider)
-    if adapter is None:
+    if adapter is None and not extended:
         raise ProviderExecutionError("unsupported_provider", "ModelRoute provider is not supported by v1 executor")
     ref = route.get("credential_ref")
     endpoint = crt_base_url(route.get("capabilities_json", {})) if provider == "crt_mko" else None
@@ -231,7 +244,11 @@ async def generate_external(route: dict, request: NormalizedGenerationRequest, a
         api_key = "" if provider == "crt_mko" else EnvironmentSecretResolver().resolve(ref)
     except ProviderConfigurationError as exc:
         raise ProviderExecutionError("credential_unavailable", "ModelRoute credential is unavailable") from exc
-    url, headers, payload = adapter.build_request(request, api_key, base_url=endpoint) if provider == "crt_mko" else adapter.build_request(request, api_key)
+    if extended:
+        url, payload = extra.build_request(provider, caps, request)
+        headers = {}
+    else:
+        url, headers, payload = adapter.build_request(request, api_key, base_url=endpoint) if provider == "crt_mko" else adapter.build_request(request, api_key)
     timeout = route.get("timeout_seconds", 60)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -246,6 +263,8 @@ async def generate_external(route: dict, request: NormalizedGenerationRequest, a
         try:
             async with asyncio.timeout(remaining):
                 async with httpx.AsyncClient(timeout=remaining, transport=transport) as client:
+                    if extended:
+                        headers = await extra.headers_for(client, provider, api_key, caps)
                     response = await client.post(url, headers=headers, json=payload)
             if response.status_code >= 300:
                 retryable = response.status_code in {408, 429} or response.status_code >= 500
@@ -259,7 +278,7 @@ async def generate_external(route: dict, request: NormalizedGenerationRequest, a
             if data.get('error'):
                 raise ProviderExecutionError('provider_error', 'Сервис вернул ошибку внутри ответа HTTP 200. Проверьте журнал сервера.')
             try:
-                return adapter.parse_response(data)
+                return extra.parse_response(provider, data) if extended else adapter.parse_response(data)
             except (KeyError, IndexError, TypeError, AttributeError, ValueError):
                 raise ProviderExecutionError('invalid_response', 'Провайдер вернул неверную структуру ответа.') from None
         except (httpx.TimeoutException, TimeoutError):

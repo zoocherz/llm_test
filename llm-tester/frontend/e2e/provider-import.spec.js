@@ -64,3 +64,51 @@ test('CRT existing connection can switch server and use HTTPS without HTTP conse
   expect(saved.capabilities.base_url).toBe('https://other.test:9443/custom/api')
   expect(saved.capabilities.allow_insecure_http).toBe(false)
 })
+
+test('all additional services expose configuration and preserve Yandex connection edits', async ({ page, request }) => {
+  const presets = await (await request.get('/api/v1/provider-presets')).json()
+  expect(presets).toHaveLength(12)
+  let catalogCalls = 0
+  let saved
+  let rows = []
+  await page.route('**/api/v1/provider-models?**', route => { catalogCalls++; return route.fulfill({ json: [] }) })
+  await page.route('**/api/v1/model-routes', async route => {
+    if (route.request().method() === 'POST') {
+      saved = route.request().postDataJSON()
+      rows = [{ ...saved, id: 'additional-test', capabilities_json: saved.capabilities }]
+      await route.fulfill({ json: rows[0] })
+    } else await route.fulfill({ json: rows })
+  })
+  await page.goto('/models')
+  const selectProvider = async label => {
+    await page.locator('.route-form .el-select').first().click()
+    await page.getByRole('option', { name: label, exact: true }).click()
+  }
+  for (const preset of presets) {
+    await selectProvider(preset.label)
+    await expect(page.getByRole('textbox', { name: 'Имя переменной с ключом', exact: true })).toHaveValue(preset.secret_name)
+    await expect(page.getByRole('textbox', { name: 'Адрес API сервиса', exact: true })).toHaveValue(preset.base_url)
+    await expect(page.getByRole('button', { name: 'Обновить список', exact: true })).toHaveCount(preset.catalog ? 1 : 0)
+  }
+  expect(catalogCalls).toBe(0)
+  await selectProvider('GigaChat')
+  await expect(page.getByText('Тип ключа GigaChat', { exact: true })).toBeVisible()
+  await expect(page.getByText('Scope GigaChat', { exact: true })).toBeVisible()
+  await selectProvider('Yandex AI Studio')
+  await page.getByRole('textbox', { name: 'Модель', exact: true }).fill('gpt://test-folder/test-model/latest')
+  await page.getByRole('button', { name: 'Сохранить подключение', exact: true }).click()
+  await expect(page.getByText('Укажите ID каталога Yandex Cloud.', { exact: true })).toBeVisible()
+  expect(saved).toBeUndefined()
+  await page.getByRole('textbox', { name: 'ID каталога Yandex Cloud', exact: true }).fill('test-folder')
+  await page.getByRole('textbox', { name: 'Адрес API сервиса', exact: true }).fill('https://custom.test:9443/v1')
+  await page.getByRole('button', { name: 'Сохранить подключение', exact: true }).click()
+  await expect(page.getByText(/Подключение сохранено:/)).toBeVisible()
+  expect(saved.credential_ref).toBe('env:YANDEX_API_KEY')
+  expect(saved.capabilities.folder_id).toBe('test-folder')
+  expect(saved.capabilities.base_url).toBe('https://custom.test:9443/v1')
+  await selectProvider('OpenAI')
+  await page.getByRole('button', { name: 'Изменить', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Адрес API сервиса', exact: true })).toHaveValue('https://custom.test:9443/v1')
+  await expect(page.getByRole('textbox', { name: 'ID каталога Yandex Cloud', exact: true })).toHaveValue('test-folder')
+  expect(catalogCalls).toBe(0)
+})

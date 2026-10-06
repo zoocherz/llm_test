@@ -74,3 +74,7 @@ ModelRoute.capabilities.base_url обязателен для crt_mko; полны
 RunItem.status=running и Attempt появляются до вызова. progress_json во время обработки дополнительно содержит active_item_id, attempt (номер повтора строки), http_attempt, active_started_at (UTC), timeout_seconds. completed — число завершённых completed/failed строк, failed — отдельное подмножество; отменённые строки не выдаются за обработанные. Attempt.route_snapshot_json содержит sequence, started_at, http_attempts, completed_at; latency_ms=null означает незавершённую попытку. Terminal progress сохраняет прежние completed/total/failed для совместимости.
 
 Details добавляет display_text для удобного чтения исторических ответов без изменения БД. Новые ответы ЦРТ имеют очищенный text; при изменении исходника сохраняются raw_text и normalization=crt_final_text_v1. Экспорт и snapshot сохраняют исторические данные. Invalid JSON имеет код invalid_json, error-envelope — provider_error; raw HTTP bodies не экспортируются. Ошибки входной валидации возвращают type/loc/msg без input/context, чтобы не отражать присланные секреты.
+
+## Дополнительные провайдеры — 2026-10-07
+
+GET /api/v1/provider-presets — публичный реестр 12 дополнительных сервисов. Параметры ModelRoute и provider-models, OAuth GigaChat, Yandex folder_id и ограничения text-only описаны в [PROVIDERS_EXPANSION](PROVIDERS_EXPANSION.md). Значения секретов не возвращаются.

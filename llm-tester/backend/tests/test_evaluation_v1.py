@@ -605,5 +605,49 @@ class EvaluationBaselineTests(unittest.TestCase):
             provider.assert_not_called()
         self.assertEqual(self.client.get('/api/v1/runs/' + run_id).json()['status'], 'completed')
 
+    def test_all_additional_providers_generate_and_judge_through_snapshots(self):
+        import httpx
+        from app.services.additional_providers import PRESETS
+        from app.services.v1_providers import generate_external
+        self.assertEqual(len(self.client.get('/api/v1/provider-presets').json()), 12)
+        with patch.dict(os.environ, {'ADDITIONAL_TEST_KEY': 'synthetic-private-key'}):
+            for name in PRESETS:
+                with self.subTest(provider=name):
+                    version, prompt, pipeline, _, suite = self.ready_fixture()
+                    saved = self.client.post('/api/v1/model-routes', json={'provider_name': name, 'model_identifier': 'synthetic-model', 'credential_ref': 'env:ADDITIONAL_TEST_KEY', 'capabilities': {'base_url': 'https://synthetic.test/v1', 'folder_id': 'test-folder'}})
+                    self.assertEqual(saved.status_code, 201, saved.text)
+                    route = saved.json()
+                    judge_stage = False
+                    calls = []
+                    async def handler(request):
+                        if request.url.path.endswith('/oauth'):
+                            return httpx.Response(200, json={'access_token': 'synthetic-token'})
+                        calls.append(json.loads(request.content))
+                        text = '{"scores":{"quality":0.75},"rationale":"Matches"}' if judge_stage else 'saved answer'
+                        payload = {'content': [{'type': 'text', 'text': text}], 'stop_reason': 'end_turn'} if name == 'anthropic' else {'choices': [{'message': {'content': text}, 'finish_reason': 'stop'}]}
+                        return httpx.Response(200, json=payload)
+                    async def execute(*args, **kwargs):
+                        return await generate_external(*args, **kwargs, transport=httpx.MockTransport(handler))
+                    with patch('app.services.evaluation_runner.generate_external', new=execute):
+                        created = self.client.post('/api/v1/runs', json={'dataset_version_id': version, 'prompt_version_ids': [prompt['id']], 'candidate_route_ids': [route['id']], 'pipeline_version_id': pipeline['id']})
+                        self.assertEqual(created.status_code, 202, created.text)
+                        source = created.json()['id']
+                        state = self.wait_run(source)
+                        self.assertEqual(state['status'], 'completed')
+                        self.assertEqual(state['snapshot_json']['routes'][0]['capabilities_json']['base_url'], 'https://synthetic.test/v1')
+                        original = self.client.get(f'/api/v1/runs/{source}/details').json()
+                        self.assertEqual(original[0]['output_json']['text'], 'saved answer')
+                        judge_stage = True
+                        judge_prompt = self.client.post('/api/v1/prompts', json={'name': 'judge', 'template': 'Input: {{input}} Reference: {{reference}} Output: {{output}}'}).json()
+                        assessed = self.client.post(f'/api/v1/runs/{source}/evaluations', json={'judge_route_id': route['id'], 'judge_prompt_id': judge_prompt['id'], 'suite_version_id': suite['id']})
+                        self.assertEqual(assessed.status_code, 202, assessed.text)
+                        self.assertEqual(self.wait_run(assessed.json()['id'])['status'], 'completed')
+                        details = self.client.get('/api/v1/runs/' + assessed.json()['id'] + '/details').json()
+                        self.assertEqual(details[0]['results'][0]['numeric_score'], 0.75)
+                    self.assertEqual(len(calls), 2)
+                    self.assertIn('saved answer', calls[1]['messages'][0]['content'])
+                    self.assertEqual(self.client.get(f'/api/v1/runs/{source}/details').json(), original)
+                    self.assertNotIn('synthetic-private-key', json.dumps([state, details]))
+
 if __name__ == "__main__":
     unittest.main()

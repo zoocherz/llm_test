@@ -43,6 +43,12 @@ class RouteCreateRequest(BaseModel):
     capabilities: dict[str, Any] = Field(default_factory=lambda: {"modalities": ["text"]}); credential_ref: str | None = Field(default=None, pattern=r"^env:[A-Z][A-Z0-9_]*$"); timeout_seconds: int = Field(default=60, ge=1, le=600)
     @model_validator(mode="after")
     def validate_transport(self):
+        from app.services.additional_providers import PRESETS, normalize_capabilities
+        self.provider_name = self.provider_name.lower()
+        if self.provider_name in PRESETS:
+            self.capabilities = normalize_capabilities(self.provider_name, self.capabilities)
+            if not self.credential_ref:
+                raise ValueError('Укажите ссылку env:VARIABLE_NAME на ключ сервиса.')
         if self.provider_name.lower() == "crt_mko":
             try:
                 self.capabilities["base_url"] = crt_base_url(self.capabilities)
