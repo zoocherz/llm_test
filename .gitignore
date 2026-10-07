@@ -83,3 +83,6 @@ e2e_test.db
 .env.*
 *.pem
 *.key
+
+# Public template contains variable names only
+!llm-tester/backend/keys.env.example

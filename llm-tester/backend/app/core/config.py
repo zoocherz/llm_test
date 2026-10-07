@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
+from app.core.env_file import ENV_FILE
 
 
 class Settings(BaseSettings):
@@ -23,7 +24,9 @@ class Settings(BaseSettings):
     DEFAULT_TIMEOUT: int = 60
     
     class Config:
-        env_file = ".env"
+        env_file = ENV_FILE
+        env_file_encoding = 'utf-8-sig'
+        extra = 'ignore'
         case_sensitive = True
 
 

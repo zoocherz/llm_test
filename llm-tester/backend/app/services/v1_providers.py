@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dotenv import dotenv_values
+from app.core.env_file import ENV_FILE
 from urllib.parse import urlsplit
 from app.services.crt_response import final_text
 from dataclasses import dataclass, field
@@ -54,8 +56,15 @@ class EnvironmentSecretResolver:
         name = credential_ref[4:]
         if not name or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for char in name):
             raise ProviderConfigurationError("credential_ref contains an invalid environment variable name")
-        value = os.getenv(name) or _read_windows_user_environment(name)
-        if not value:
+        value = os.getenv(name)
+        if not value or not value.strip():
+            try:
+                value = dotenv_values(ENV_FILE, encoding='utf-8-sig', interpolate=False).get(name)
+            except (OSError, UnicodeError):
+                raise ProviderConfigurationError('Local key file could not be read as UTF-8') from None
+        if not value or not value.strip():
+            value = _read_windows_user_environment(name)
+        if not value or not value.strip():
             raise ProviderConfigurationError(f"credential reference {credential_ref} is unavailable")
         return value
 
